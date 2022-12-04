@@ -1,1 +1,2 @@
-from .tool import TreeCSE
+from .tool import SimCSE
+from .teachers import Teacher

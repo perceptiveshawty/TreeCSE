@@ -86,6 +86,8 @@ import numpy as np
 from datetime import datetime
 from filelock import FileLock
 
+from treecse.teachers import Teacher
+
 logger = logging.get_logger(__name__)
 
 class CLTrainer(Trainer):
@@ -401,6 +403,9 @@ class CLTrainer(Trainer):
                     "batches in the first epoch."
                 )
 
+        # TODO: Initialize the teacher model here
+        teacher = Teacher()
+
         # Update the references
         self.callback_handler.model = self.model
         self.callback_handler.optimizer = self.optimizer
@@ -455,6 +460,40 @@ class CLTrainer(Trainer):
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(self.args, self.state, self.control)
+
+
+                # TODO: pass the ground truth similarity lists obtained by the teacher in inputs["cos_sim"]
+                with torch.no_grad():
+
+                    input_ids = inputs["input_ids"]
+                    attention_mask = inputs["attention_mask"]
+                    token_type_ids = inputs["token_type_ids"]
+
+                    token_type_ids = None
+                    if "token_type_ids" in inputs:
+                        token_type_ids = inputs["token_type_ids"]
+    
+                    batch_size = input_ids.size(0)
+                    num_sent = input_ids.size(1)
+
+                    input_ids = input_ids.view((-1, input_ids.size(-1)))
+                    token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1)))
+                    attention_mask = attention_mask.view((-1, attention_mask.size(-1)))
+
+                    teacher_inputs = copy.deepcopy(inputs)
+                    teacher_inputs["input_ids"] = input_ids
+                    teacher_inputs["attention_mask"] = attention_mask
+                    teacher_inputs["token_type_ids"] = token_type_ids
+
+                    embeddings = teacher.encode(teacher_inputs)
+                    embeddings = embeddings.view((batch_size, num_sent, -1))
+                    
+                    anchor, p1, p2, p3 = embeddings[:,0], embeddings[:,1], embeddings[:,2], embeddings[:,3]
+
+                    inputs["anchor"] = anchor
+                    inputs["p1"] = p1
+                    inputs["p2"] = p2
+                    inputs["p3"] = p3
 
                 if ((step + 1) % self.args.gradient_accumulation_steps != 0) and self.args.local_rank != -1:
                     # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.

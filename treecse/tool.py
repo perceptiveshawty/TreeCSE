@@ -14,15 +14,15 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class TreeCSE(object):
+class SimCSE(object):
     """
-    A class for embedding sentences, calculating similarities, and retriving sentences by TreeCSE.
+    A class for embedding sentences, calculating similarities, and retriving sentences by SimCSE.
     """
     def __init__(self, model_name_or_path: str, 
-                device: str = None,
-                num_cells: int = 100,
-                num_cells_in_search: int = 10,
-                pooler = None):
+                 device: str = None,
+                 num_cells: int = 100,
+                 num_cells_in_search: int = 10,
+                 pooler = None):
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         self.model = AutoModel.from_pretrained(model_name_or_path)
@@ -259,16 +259,16 @@ if __name__=="__main__":
         'A woman is making a photo.'
     ]
 
-    model_name = "/"
-    treecse = TreeCSE(model_name)
+    model_name = "princeton-nlp/sup-simcse-bert-base-uncased"
+    simcse = SimCSE(model_name)
 
     print("\n=========Calculate cosine similarities between queries and sentences============\n")
-    similarities = treecse.similarity(example_queries, example_sentences)
+    similarities = simcse.similarity(example_queries, example_sentences)
     print(similarities)
 
     print("\n=========Naive brute force search============\n")
-    treecse.build_index(example_sentences, use_faiss=False)
-    results = treecse.search(example_queries)
+    simcse.build_index(example_sentences, use_faiss=False)
+    results = simcse.search(example_queries)
     for i, result in enumerate(results):
         print("Retrieval results for query: {}".format(example_queries[i]))
         for sentence, score in result:
@@ -276,8 +276,8 @@ if __name__=="__main__":
         print("")
     
     print("\n=========Search with Faiss backend============\n")
-    treecse.build_index(example_sentences, use_faiss=True)
-    results = treecse.search(example_queries)
+    simcse.build_index(example_sentences, use_faiss=True)
+    results = simcse.search(example_queries)
     for i, result in enumerate(results):
         print("Retrieval results for query: {}".format(example_queries[i]))
         for sentence, score in result:

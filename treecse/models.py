@@ -95,6 +95,11 @@ class Pooler(nn.Module):
             raise NotImplementedError
 
 
+def mask_diagonal(mdist):
+    return mdist.fill_diagonal_(-float('inf'))
+    # return mdist.flatten()[1:].view(mdist.size(-1) - 1, mdist.size(-1) + 1)[:,:-1].reshape(mdist.size(-1), mdist.size(-1) - 1)
+
+
 def cl_init(cls, config):
     """
     Contrastive learning class init function.
@@ -121,6 +126,10 @@ def cl_forward(cls,
     return_dict=None,
     mlm_input_ids=None,
     mlm_labels=None,
+    anchor=None,
+    p1=None,
+    p2=None,
+    p3=None,
 ):
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
     ori_input_ids = input_ids
@@ -231,10 +240,25 @@ def cl_forward(cls,
 
     loss = loss_fct(cos_sim, labels)
 
-    # Calculate Jensen-Shannon Divergence between anchor/left and anchor/right similarity lists
-    cos_sim_left = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
-    cos_sim_right = cls.sim(z1.unsqueeze(1), z4.unsqueeze(0))
-    js_div = cls.div(F.softmax(cos_sim_left, dim=-1), F.softmax(cos_sim_right, dim=-1))
+    # Calculate loss for ranking distillation
+    student_sim_pred = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+    teacher_ensemble = p1 + p2 + p3
+    teacher_sim_pred = cls.sim(anchor.unsqueeze(1), teacher_ensemble.unsqueeze(0))
+
+    student_top1_sim_pred = F.softmax(mask_diagonal(student_sim_pred))
+    teacher_top1_sim_pred = F.softmax(mask_diagonal(teacher_sim_pred))
+
+    distillation_loss_fct = nn.CrossEntropyLoss() 
+    loss = loss + 1.0 * distillation_loss_fct(student_top1_sim_pred, teacher_top1_sim_pred)
+
+    # Calculate loss for ranking consistency
+    cos_sim_anchor_left = mask_diagonal(cls.sim(z1.unsqueeze(1), z3.unsqueeze(0)))
+    cos_sim_ensemble_left = mask_diagonal(cls.sim(z2.unsqueeze(1), z3.unsqueeze(0)))
+
+    cos_sim_anchor_right = mask_diagonal(cls.sim(z1.unsqueeze(1), z4.unsqueeze(0)))
+    cos_sim_ensemble_right = mask_diagonal(cls.sim(z2.unsqueeze(1), z4.unsqueeze(0)))
+
+    js_div = (0.5 * cls.div(F.softmax(cos_sim_anchor_left, dim=-1), F.softmax(cos_sim_ensemble_left, dim=-1))) + (0.5 * cls.div(F.softmax(cos_sim_anchor_right, dim=-1), F.softmax(cos_sim_ensemble_right, dim=-1)))
     loss = loss + cls.model_args.jsd_weight * js_div
 
     # Calculate loss for MLM
@@ -325,6 +349,10 @@ class BertForCL(BertPreTrainedModel):
         sent_emb=False,
         mlm_input_ids=None,
         mlm_labels=None,
+        anchor=None,
+        p1=None,
+        p2=None,
+        p3=None,
     ):
         if sent_emb:
             return sentemb_forward(self, self.bert,
@@ -353,6 +381,10 @@ class BertForCL(BertPreTrainedModel):
                 return_dict=return_dict,
                 mlm_input_ids=mlm_input_ids,
                 mlm_labels=mlm_labels,
+                anchor=None,
+                p1=None,
+                p2=None,
+                p3=None,
             )
 
 

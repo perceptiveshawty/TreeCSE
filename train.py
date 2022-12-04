@@ -36,6 +36,7 @@ from transformers.data.data_collator import DataCollatorForLanguageModeling
 from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
 from treecse.models import RobertaForCL, BertForCL
 from treecse.trainers import CLTrainer
+# from treecse.teachers import Teacher
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -88,7 +89,15 @@ class ModelArguments:
     # TreeCSE's arguments
     trees: bool = field(
         default=True,
-        metadata={"help": "Whether or not to use the tree-based sampling for unsupervised training"}
+        metadata={
+            "help": "Whether or not to use the tree-based sampling for unsupervised training"
+        },
+    )
+    jsd_weight: float = field(
+        default=1.0,
+        metadata={
+            "help": "Weight for divergence loss term"
+        },
     )
 
     # SimCSE's arguments
