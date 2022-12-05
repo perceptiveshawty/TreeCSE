@@ -5,7 +5,7 @@ class Teacher(SimCSE):
     A class for distilling ranking knowledge from SimCSE-based models. It is the same as the SimCSE except the features are precomputed and passed to the constructor.
     """
 
-    def __init__(self, model_name_or_path: str = "princeton-nlp/unsup-simcse-bert-base-uncased", 
+    def __init__(self, model_name_or_path: str = "voidism/diffcse-bert-base-uncased-sts", 
                 device: str = None,
                 num_cells: int = 100,
                 num_cells_in_search: int = 10,

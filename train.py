@@ -93,12 +93,19 @@ class ModelArguments:
             "help": "Whether or not to use the tree-based sampling for unsupervised training"
         },
     )
-    jsd_weight: float = field(
+    sd_weight: float = field(
         default=1.0,
         metadata={
-            "help": "Weight for divergence loss term"
+            "help": "Weight for the self-distillation / consistency loss"
         },
     )
+    kd_weight: float = field(
+        default=1.0,
+        metadata={
+            "help": "Weight for the soft knowledge distillation loss"
+        },
+    )
+
 
     # SimCSE's arguments
     temp: float = field(

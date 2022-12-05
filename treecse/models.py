@@ -75,6 +75,43 @@ class SoftCrossEntropyLoss(nn.Module):
         loss = -(q*p).nansum()  / q.nansum()
         return loss
 
+class ListMLELoss(nn.Module):
+    def __init__(self):
+        super(ListMLELoss, self).__init__()
+        self.temp_scaled_sim = Similarity(0.05)
+        self.eps = 1e-7
+
+    def forward(self, z1T, z2T, z1, z2):
+        student_top1_sim_pred = self.temp_scaled_sim(z1.unsqueeze(1), z2.unsqueeze(0))
+        teacher_top1_sim_pred = self.temp_scaled_sim(z1T.unsqueeze(1), z2T.unsqueeze(0))
+
+        y_pred = student_top1_sim_pred
+        y_true = teacher_top1_sim_pred
+
+        # shuffle for randomised tie resolution
+        random_indices = torch.randperm(y_pred.shape[-1])
+        y_pred_shuffled = y_pred[:, random_indices]
+        y_true_shuffled = y_true[:, random_indices]
+
+        y_true_sorted, indices = y_true_shuffled.sort(descending=True, dim=-1)
+
+        mask = y_true_sorted == -float('inf')
+
+        preds_sorted_by_true = torch.gather(y_pred_shuffled, dim=1, index=indices)
+        preds_sorted_by_true[mask] = -float("inf")
+
+        max_pred_values, _ = preds_sorted_by_true.max(dim=1, keepdim=True)
+
+        preds_sorted_by_true_minus_max = preds_sorted_by_true - max_pred_values
+
+        cumsums = torch.cumsum(preds_sorted_by_true_minus_max.exp().flip(dims=[1]), dim=1).flip(dims=[1])
+
+        observation_loss = torch.log(cumsums + self.eps) - preds_sorted_by_true_minus_max
+
+        observation_loss[mask] = 0.0
+
+        return torch.mean(torch.sum(observation_loss, dim=1))
+
 class Pooler(nn.Module):
     """
     Parameter-free poolers to get the sentence embedding
@@ -111,11 +148,9 @@ class Pooler(nn.Module):
         else:
             raise NotImplementedError
 
-
 def mask_diagonal(mdist):
     return mdist.fill_diagonal_(-float('inf'))
     # return mdist.flatten()[1:].view(mdist.size(-1) - 1, mdist.size(-1) + 1)[:,:-1].reshape(mdist.size(-1), mdist.size(-1) - 1)
-
 
 def cl_init(cls, config):
     """
@@ -208,25 +243,28 @@ def cl_forward(cls,
     # Separate representation
     z1, z2, z3, z4 = pooler_output[:,0], pooler_output[:,1], pooler_output[:,2], pooler_output[:,3]
 
+    # Contrastive loss
     cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
     labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
 
     loss_fct = nn.CrossEntropyLoss()
     loss = loss_fct(cos_sim, labels)
 
-    # Calculate ranking distillation loss
-    distillation_loss_fct = SoftCrossEntropyLoss()
-    loss = loss + (1.0 * distillation_loss_fct(anchor.to(cls.device), (p1 + p2 + p3).to(cls.device), z1, z2))
+    # Knowledge distillation
+    distillation_loss_fct = ListMLELoss() # SoftCrossEntropyLoss()
+    loss = loss + (cls.model_args.kd_weight * distillation_loss_fct(anchor.to(cls.device), (p1 + p2 + p3).to(cls.device), z1, z2))
 
-    # Calculate ranking consistency / self-distillation loss
+    # Self-distillation
     cos_sim_anchor_left = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
     cos_sim_ensemble_left = cls.sim(z2.unsqueeze(1), z3.unsqueeze(0))
 
     cos_sim_anchor_right = cls.sim(z1.unsqueeze(1), z4.unsqueeze(0))
     cos_sim_ensemble_right = cls.sim(z2.unsqueeze(1), z4.unsqueeze(0))
 
-    js_div = (0.5 * cls.div(F.softmax(cos_sim_anchor_left, dim=-1), F.softmax(cos_sim_ensemble_left, dim=-1))) + (0.5 * cls.div(F.softmax(cos_sim_anchor_right, dim=-1), F.softmax(cos_sim_ensemble_right, dim=-1)))
-    loss = loss + (cls.model_args.jsd_weight * js_div)
+    js_div = cls.div(F.softmax(cos_sim_anchor_left, dim=-1), F.softmax(cos_sim_ensemble_left, dim=-1))
+    js_div = js_div + cls.div(F.softmax(cos_sim_anchor_right, dim=-1), F.softmax(cos_sim_ensemble_right, dim=-1))
+    js_div = 0.5 * js_div
+    loss = loss + (cls.model_args.sd_weight * js_div)
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:
@@ -244,7 +282,6 @@ def cl_forward(cls,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
     )
-
 
 def sentemb_forward(
     cls,
@@ -287,7 +324,6 @@ def sentemb_forward(
         last_hidden_state=outputs.last_hidden_state,
         hidden_states=outputs.hidden_states,
     )
-
 
 class BertForCL(BertPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"position_ids"]
