@@ -52,11 +52,28 @@ class Divergence(nn.Module):
     def __init__(self):
         super(Divergence, self).__init__()
         self.kl = nn.KLDivLoss(reduction='batchmean', log_target=True)
+        self.eps = 1e-7
 
     def forward(self, p: torch.tensor, q: torch.tensor):
+        # p, q = p.to(torch.float32), q.to(torch.float32)
         p, q = p.view(-1, p.size(-1)), q.view(-1, q.size(-1))
-        m = (0.5 * (p + q)).log()
-        return 0.5 * (self.kl(m, p.log()) + self.kl(m, q.log()))
+        m = (0.5 * (p + q)).log().clamp(min=self.eps)
+        return 0.5 * (self.kl(m, p.log().clamp(min=self.eps)) + self.kl(m, q.log().clamp(min=self.eps)))
+
+class SoftCrossEntropyLoss(nn.Module):
+    def __init__(self):
+        super(SoftCrossEntropyLoss, self).__init__()
+        self.teacher_temp_scaled_sim = Similarity(0.0125)
+        self.student_temp_scaled_sim = Similarity(0.025)
+
+    def forward(self, z1T, z2T, z1, z2):
+        student_top1_sim_pred = self.student_temp_scaled_sim(z1.unsqueeze(1), z2.unsqueeze(0))
+        teacher_top1_sim_pred = self.teacher_temp_scaled_sim(z1T.unsqueeze(1), z2T.unsqueeze(0))
+
+        p = F.log_softmax(mask_diagonal(student_top1_sim_pred), dim=-1)
+        q = F.softmax(mask_diagonal(teacher_top1_sim_pred), dim=-1)
+        loss = -(q*p).nansum()  / q.nansum()
+        return loss
 
 class Pooler(nn.Module):
     """
@@ -177,7 +194,7 @@ def cl_forward(cls,
     pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
 
     if cls.model_args.trees:
-        # Use TreeCSE ensembling
+        # Tree-based ensembling
         anchor_output, ensemble_output = torch.split(pooler_output, split_size_or_sections=[1, num_sent - 1], dim=1)  # (bs, 1, hidden) and (bs, num_sent - 1, hidden)
         left_output, *_, right_output = torch.split(torch.clone(ensemble_output), split_size_or_sections=[1 for _ in range(num_sent - 1)], dim=1) # (bs, num_sent - 1, hidden) -> (bs, 1, hidden) and (bs, 1, hidden)
         ensemble_output = ensemble_output.sum(dim=1, keepdim=True) # (bs, num_sent - 1, hidden) -> (bs, 1, hidden)
@@ -191,75 +208,25 @@ def cl_forward(cls,
     # Separate representation
     z1, z2, z3, z4 = pooler_output[:,0], pooler_output[:,1], pooler_output[:,2], pooler_output[:,3]
 
-    # Hard negative
-    # if num_sent == 3:
-    #     z3 = pooler_output[:, 2]
-
-    # Gather all embeddings if using distributed training
-    # if dist.is_initialized() and cls.training:
-    #     # Gather hard negative
-    #     # if num_sent >= 3:
-    #     #     z3_list = [torch.zeros_like(z3) for _ in range(dist.get_world_size())]
-    #     #     dist.all_gather(tensor_list=z3_list, tensor=z3.contiguous())
-    #     #     z3_list[dist.get_rank()] = z3
-    #     #     z3 = torch.cat(z3_list, 0)
-
-    #     # Dummy vectors for allgather
-    #     z1_list = [torch.zeros_like(z1) for _ in range(dist.get_world_size())]
-    #     z2_list = [torch.zeros_like(z2) for _ in range(dist.get_world_size())]
-    #     # Allgather
-    #     dist.all_gather(tensor_list=z1_list, tensor=z1.contiguous())
-    #     dist.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
-
-    #     # Since allgather results do not have gradients, we replace the
-    #     # current process's corresponding embeddings with original tensors
-    #     z1_list[dist.get_rank()] = z1
-    #     z2_list[dist.get_rank()] = z2
-    #     # Get full batch embeddings: (bs x N, hidden)
-    #     z1 = torch.cat(z1_list, 0)
-    #     z2 = torch.cat(z2_list, 0)
-
     cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
-
-    # Hard negative
-    # if num_sent >= 3:
-    #     z1_z3_cos = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
-    #     cos_sim = torch.cat([cos_sim, z1_z3_cos], 1)
-
     labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
+
     loss_fct = nn.CrossEntropyLoss()
-
-    # Calculate loss with hard negatives
-    # if num_sent == 3:
-    #     # Note that weights are actually logits of weights
-    #     z3_weight = cls.model_args.hard_negative_weight
-    #     weights = torch.tensor(
-    #         [[0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (z1_z3_cos.size(-1) - i - 1) for i in range(z1_z3_cos.size(-1))]
-    #     ).to(cls.device)
-    #     cos_sim = cos_sim + weights
-
     loss = loss_fct(cos_sim, labels)
 
-    # Calculate loss for ranking distillation
-    student_sim_pred = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
-    teacher_ensemble = p1 + p2 + p3
-    teacher_sim_pred = cls.sim(anchor.unsqueeze(1), teacher_ensemble.unsqueeze(0))
+    # Calculate ranking distillation loss
+    distillation_loss_fct = SoftCrossEntropyLoss()
+    loss = loss + (1.0 * distillation_loss_fct(anchor.to(cls.device), (p1 + p2 + p3).to(cls.device), z1, z2))
 
-    student_top1_sim_pred = F.softmax(mask_diagonal(student_sim_pred))
-    teacher_top1_sim_pred = F.softmax(mask_diagonal(teacher_sim_pred))
+    # Calculate ranking consistency / self-distillation loss
+    cos_sim_anchor_left = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
+    cos_sim_ensemble_left = cls.sim(z2.unsqueeze(1), z3.unsqueeze(0))
 
-    distillation_loss_fct = nn.CrossEntropyLoss() 
-    loss = loss + 1.0 * distillation_loss_fct(student_top1_sim_pred, teacher_top1_sim_pred)
-
-    # Calculate loss for ranking consistency
-    cos_sim_anchor_left = mask_diagonal(cls.sim(z1.unsqueeze(1), z3.unsqueeze(0)))
-    cos_sim_ensemble_left = mask_diagonal(cls.sim(z2.unsqueeze(1), z3.unsqueeze(0)))
-
-    cos_sim_anchor_right = mask_diagonal(cls.sim(z1.unsqueeze(1), z4.unsqueeze(0)))
-    cos_sim_ensemble_right = mask_diagonal(cls.sim(z2.unsqueeze(1), z4.unsqueeze(0)))
+    cos_sim_anchor_right = cls.sim(z1.unsqueeze(1), z4.unsqueeze(0))
+    cos_sim_ensemble_right = cls.sim(z2.unsqueeze(1), z4.unsqueeze(0))
 
     js_div = (0.5 * cls.div(F.softmax(cos_sim_anchor_left, dim=-1), F.softmax(cos_sim_ensemble_left, dim=-1))) + (0.5 * cls.div(F.softmax(cos_sim_anchor_right, dim=-1), F.softmax(cos_sim_ensemble_right, dim=-1)))
-    loss = loss + cls.model_args.jsd_weight * js_div
+    loss = loss + (cls.model_args.jsd_weight * js_div)
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:
@@ -381,13 +348,11 @@ class BertForCL(BertPreTrainedModel):
                 return_dict=return_dict,
                 mlm_input_ids=mlm_input_ids,
                 mlm_labels=mlm_labels,
-                anchor=None,
-                p1=None,
-                p2=None,
-                p3=None,
+                anchor=anchor,
+                p1=p1,
+                p2=p2,
+                p3=p3,
             )
-
-
 
 class RobertaForCL(RobertaPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"position_ids"]

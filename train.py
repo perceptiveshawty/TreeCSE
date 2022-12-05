@@ -8,7 +8,7 @@ import torch
 import collections
 import random
 
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 
 import transformers
 from transformers import (
@@ -67,7 +67,7 @@ class ModelArguments:
         default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
     )
     cache_dir: Optional[str] = field(
-        default=None,
+        default="/scratch/user/chanchanis/.cache/huggingface/transformers",
         metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
     )
     use_fast_tokenizer: bool = field(
@@ -323,7 +323,7 @@ def main():
     if extension == "csv":
         datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/", delimiter="\t" if "tsv" in data_args.train_file else ",")
     else:
-        datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/")
+        datasets = load_dataset(extension, data_files=data_files, cache_dir="/scratch/user/chanchanis/TreeCSE/data/")
 
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.

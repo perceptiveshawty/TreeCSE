@@ -5,7 +5,7 @@ class Teacher(SimCSE):
     A class for distilling ranking knowledge from SimCSE-based models. It is the same as the SimCSE except the features are precomputed and passed to the constructor.
     """
 
-    def __init__(self, model_name_or_path: str = "voidism/diffcse-bert-base-uncased-sts", 
+    def __init__(self, model_name_or_path: str = "princeton-nlp/unsup-simcse-bert-base-uncased", 
                 device: str = None,
                 num_cells: int = 100,
                 num_cells_in_search: int = 10,
@@ -49,7 +49,7 @@ class Teacher(SimCSE):
             # if normalize_to_unit:
             #     embeddings = embeddings / embeddings.norm(dim=1, keepdim=True)
             embedding_list.append(embeddings)
-        embeddings = torch.cat(embedding_list)
+            embeddings = torch.cat(embedding_list)
         
         # if single_sentence and not keepdim:
         #     embeddings = embeddings[0]
