@@ -490,12 +490,6 @@ class CLTrainer(Trainer):
                     
                     anchor, p1, p2, p3 = embeddings[:,0], embeddings[:,1], embeddings[:,2], embeddings[:,3]
 
-                    # print(anchor.shape)
-                    # print(p1.shape)
-                    # print(p2.shape)
-                    # print(p3.shape)
-                    # assert False
-
                     inputs["anchor"] = anchor
                     inputs["p1"] = p1
                     inputs["p2"] = p2

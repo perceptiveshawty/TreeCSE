@@ -403,9 +403,14 @@ def main():
     model.resize_token_embeddings(len(tokenizer))
 
     # Prepare features
+    do_augmentations = False
     column_names = datasets['train'].column_names
-    sent3_cname, sent4_cname = None, None
-    if len(column_names) == 3: 
+    sent2_cname, sent3_cname, sent4_cname = None, None, None
+    if len(column_names) == 4 and 'scheme' in column_names:
+        # SimCLR
+        sent0_cname, sent1_cname, label0_cname, label1_cname = column_names
+        do_augmentations = True
+    elif len(column_names) == 3: 
         # A = B + C
         sent0_cname, sent1_cname, sent2_cname = column_names
     elif len(column_names) == 4:
@@ -425,6 +430,7 @@ def main():
         #   exceed the max length.
         # padding = max_length (when pad_to_max_length, for pressure test)
         #   All sentences are padded/truncated to data_args.max_seq_length.
+
         total = len(examples[sent0_cname])
         # Avoid "None" fields 
         for idx in range(total):
@@ -432,11 +438,30 @@ def main():
                 examples[sent0_cname][idx] = " "
             if examples[sent1_cname][idx] is None:
                 examples[sent1_cname][idx] = " "
-            if examples[sent2_cname][idx] is None:
-                examples[sent2_cname][idx] = " "
 
-        sentences = examples[sent0_cname] + examples[sent1_cname] + examples[sent2_cname]
+        sentences = examples[sent0_cname] + examples[sent1_cname]
 
+        if do_augmentations:
+            label = 0
+            label2integer = {}
+            for idx in range(total):
+                if examples[label0_cname][idx] not in label2integer:
+                    label2integer[examples[label0_cname][idx]] = label
+                    label += 1
+                examples[label0_cname][idx] = label2integer[examples[label0_cname][idx]]
+                if examples[label1_cname][idx] not in label2integer:
+                    label2integer[examples[label1_cname][idx]] = label
+                    label += 1
+                examples[label1_cname][idx] = label2integer[examples[label1_cname][idx]]
+            relations = examples[label0_cname] + examples[label1_cname]
+            config.num_classes = len(label2integer)
+
+
+        if sent2_cname is not None:
+            for idx in range(total):
+                if examples[sent2_cname][idx] is None:
+                    examples[sent2_cname] = " "
+            sentences += examples[sent2_cname]
         if sent3_cname is not None:
             for idx in range(total):
                 if examples[sent3_cname][idx] is None:
@@ -463,9 +488,15 @@ def main():
         elif sent3_cname is not None:
             for key in sent_features:
                 features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2], sent_features[key][i+total*3]] for i in range(total)]
-        else:
+        elif sent2_cname is not None:
             for key in sent_features:
                 features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)]
+        elif sent1_cname is not None and do_augmentations:
+            for key in sent_features:
+                features[key] = [[sent_features[key][i], sent_features[key][i+total]] for i in range(total)]
+            features['relations'] = [[relations[i], relations[i+total]] for i in range(total)]
+        else:
+            raise NotImplementedError
     
         return features
     

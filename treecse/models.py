@@ -60,6 +60,22 @@ class Divergence(nn.Module):
         m = (0.5 * (p + q)).log().clamp(min=self.eps)
         return 0.5 * (self.kl(m, p.log().clamp(min=self.eps)) + self.kl(m, q.log().clamp(min=self.eps)))
 
+class Classifier(nn.Module):
+    """
+    Head for getting relation predictions over RoBERTa/BERT's CLS representation.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.num_classes)
+        self.activation = nn.ReLU()
+
+    def forward(self, features, **kwargs):
+        x = self.dense(features)
+        x = self.activation(x)
+
+        return x
+
 class SoftCrossEntropyLoss(nn.Module):
     def __init__(self):
         super(SoftCrossEntropyLoss, self).__init__()
@@ -160,6 +176,8 @@ def cl_init(cls, config):
     cls.pooler = Pooler(cls.model_args.pooler_type)
     if cls.model_args.pooler_type == "cls":
         cls.mlp = MLPLayer(config)
+    if config.num_classes is not None:
+        cls.clf = Classifier(config)
     cls.sim = Similarity(temp=cls.model_args.temp)
     cls.div = Divergence()
     cls.init_weights()
@@ -240,6 +258,9 @@ def cl_forward(cls,
     if cls.pooler_type == "cls":
         pooler_output = cls.mlp(pooler_output)
 
+    if cls.clf is not None:
+        relation_pred_logits = cls.clf(pooler_output)
+
     # Separate representation
     z1, z2, z3, z4 = pooler_output[:,0], pooler_output[:,1], pooler_output[:,2], pooler_output[:,3]
 
@@ -265,6 +286,9 @@ def cl_forward(cls,
     js_div = js_div + cls.div(F.softmax(cos_sim_anchor_right, dim=-1), F.softmax(cos_sim_ensemble_right, dim=-1))
     js_div = 0.5 * js_div
     loss = loss + (cls.model_args.sd_weight * js_div)
+
+    # Relation prediction
+
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:

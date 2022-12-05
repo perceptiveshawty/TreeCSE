@@ -6,7 +6,7 @@ from RST import RST
 
 def parse_args():
     parser = argparse.ArgumentParser(description='RST Dataset Curation')
-    parser.add_argument('--strategy', type=str, default='deep', choices=['full', 'deep', 'shallow', 'simcse'],
+    parser.add_argument('--strategy', type=str, default='deep', choices=['full', 'deep', 'shallow', 'simcse', 'tree'],
                         help='whether to sample from the whole (full) RST, or bottom/top (deep/shallow) of the RST')
     parser.add_argument('--data_dir', type=str, default='./data/wikitext103',
                         help='path to data dir; expects output of DMRST_Parser + original text file (4 total files)')
@@ -185,6 +185,71 @@ def make_deep_rst_dataset(output_dir):
             deep += 1
 
     with open(os.path.join(output_dir, 'deep_data_for_cse.json'), 'w') as jout:
+        ndjson.dump(examples, jout)
+
+def make_rst_dataset(output_dir):
+    examples = []
+    with open(os.path.join(output_dir, 'passages.txt'), 'r') as p_, open(os.path.join(output_dir, 'tokenization.txt'), 'r') as t_, open(os.path.join(output_dir, 'segmentation.txt'), 'r') as e_, open(os.path.join(output_dir, 'tree.txt'), 'r') as s_:
+        orig_examples, rst_tokens, rst_edus, rst_rels = p_.readlines(), t_.readlines(), e_.readlines(), s_.readlines()
+    
+    for index, ex in enumerate(orig_examples):
+        try:
+            tokenization = rst_tokens[index].strip()[1:-1].split(", ")
+            tokenization = [t[1:-1] for t in tokenization]
+            segmentation = [int(k) for k in rst_edus[index].strip()[1:-1].split(", ")]
+            parsetree = rst_rels[index].strip()[2:-2].split()
+            rst_example = RST.from_data(tokenization, segmentation, parsetree)
+        except:
+            continue
+
+        all_left_args, all_right_args, all_schemes = RST.all_rst_cutouts(rst_example)
+        all_cutouts_valid = [(sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]), left_, right_, scheme_) for left_, right_, scheme_ in zip(all_left_args, all_right_args, all_schemes) if sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]) > 40]
+        _, left_arg_edus, right_arg_edus, _ = zip(*sorted(all_cutouts_valid, key=lambda x:x[0], reverse=False))
+
+        deep = 0
+        for lae, rae in zip(left_arg_edus, right_arg_edus):
+            if deep <= len(left_arg_edus) // 2:
+                all_edus = [e.text for e in lae] + [e.text for e in rae]
+                parent = " ".join(all_edus)
+                left, right = merge_edus(all_edus, k=2)
+                examples.append({'parent' : parent, 'left' : left, 'right' : right})
+            deep += 1
+
+    with open(os.path.join(output_dir, 'rst_data_for_cse.json'), 'w') as jout:
+        ndjson.dump(examples, jout)
+
+def make_simclr_rst_dataset(output_dir):
+    examples = []
+    with open(os.path.join(output_dir, 'passages.txt'), 'r') as p_, open(os.path.join(output_dir, 'tokenization.txt'), 'r') as t_, open(os.path.join(output_dir, 'segmentation.txt'), 'r') as e_, open(os.path.join(output_dir, 'tree.txt'), 'r') as s_:
+        orig_examples, rst_tokens, rst_edus, rst_rels = p_.readlines(), t_.readlines(), e_.readlines(), s_.readlines()
+    
+    for index, ex in enumerate(orig_examples):
+        try:
+            tokenization = rst_tokens[index].strip()[1:-1].split(", ")
+            tokenization = [t[1:-1] for t in tokenization]
+            segmentation = [int(k) for k in rst_edus[index].strip()[1:-1].split(", ")]
+            parsetree = rst_rels[index].strip()[2:-2].split()
+            rst_example = RST.from_data(tokenization, segmentation, parsetree)
+        except:
+            continue
+
+        x1, x2, s1, s2 = RST.apply_simclr_transforms(rst_example)
+        examples.append({'x1' : x1, 'x2' : x2, 'scheme1' : s1, 'scheme2' : s2 })
+
+        # all_left_args, all_right_args, all_schemes = RST.all_rst_cutouts(rst_example)
+        # all_cutouts_valid = [(sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]), left_, right_, scheme_) for left_, right_, scheme_ in zip(all_left_args, all_right_args, all_schemes) if sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]) > 40]
+        # _, left_arg_edus, right_arg_edus, _ = zip(*sorted(all_cutouts_valid, key=lambda x:x[0], reverse=False))
+
+        # deep = 0
+        # for lae, rae in zip(left_arg_edus, right_arg_edus):
+        #     if deep <= len(left_arg_edus) // 2:
+        #         all_edus = [e.text for e in lae] + [e.text for e in rae]
+        #         parent = " ".join(all_edus)
+        #         left, right = merge_edus(all_edus, k=2)
+        #         examples.append({'parent' : parent, 'left' : left, 'right' : right})
+        #     deep += 1
+
+    with open(os.path.join(output_dir, 'rst_data_for_cse.json'), 'w') as jout:
         ndjson.dump(examples, jout)
 
 if __name__ == '__main__':

@@ -156,12 +156,14 @@ class RST:
         
         all_left_args, all_right_args, all_schemes = RST.all_rst_cutouts(rst_example)
         all_cutouts_valid = [(len(left_) + len(right_), left_, right_, scheme_) for left_, right_, scheme_ in zip(all_left_args, all_right_args, all_schemes) if len(left_) + len(right_) > 3]
-        _, left_arg_edus, right_arg_edus, _ = sorted(all_cutouts_valid, key=lambda x:x[0])
+        _, left_arg_edus, right_arg_edus, schemes = sorted(all_cutouts_valid, key=lambda x:x[0])
 
         n_subtrees = len(all_cutouts_valid)
         random_crop_index_1, random_crop_index_2 = np.random.randint(0, n_subtrees // 2, size=2)
         edu_span_1 = left_arg_edus[random_crop_index_1].extend(right_arg_edus[random_crop_index_1])
         edu_span_2 = left_arg_edus[random_crop_index_2].extend(right_arg_edus[random_crop_index_2])
+        scheme_1 = schemes[random_crop_index_1]
+        scheme_2 = schemes[random_augm_index_2]
 
         tx_1, tx_2 = [], []
         random_augm_index_1 = np.random.randint(0, 5)
@@ -231,7 +233,7 @@ class RST:
             # shuffle
             tx_2 = np.random.shuffle(edu_span_2)
 
-        return " ".join([e.text for e in edu_span_1]), " ".join([e.text for e in edu_span_2])
+        return " ".join([e.text for e in edu_span_1]), " ".join([e.text for e in edu_span_2]), scheme_1, scheme_2
 
     @staticmethod
     def sample_3deep(rst):
