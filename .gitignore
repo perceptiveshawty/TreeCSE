@@ -1,6 +1,8 @@
 /.venv
+/.venv3
 data/*
 !data/download_wikitext103.py
 /SentEval
 /runs
 *.cpython*
+outputlogs.*

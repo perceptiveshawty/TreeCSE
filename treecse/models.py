@@ -61,10 +61,10 @@ class Divergence(nn.Module):
         return 0.5 * (self.kl(m, p.log().clamp(min=self.eps)) + self.kl(m, q.log().clamp(min=self.eps)))
 
 class SoftCrossEntropyLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, tau2, tau3):
         super(SoftCrossEntropyLoss, self).__init__()
-        self.teacher_temp_scaled_sim = Similarity(0.0125)
-        self.student_temp_scaled_sim = Similarity(0.025)
+        self.teacher_temp_scaled_sim = Similarity(tau3)
+        self.student_temp_scaled_sim = Similarity(tau2)
 
     def forward(self, z1T, z2T, z1, z2):
         student_top1_sim_pred = self.student_temp_scaled_sim(z1.unsqueeze(1), z2.unsqueeze(0))
@@ -98,7 +98,7 @@ class ListMLELoss(nn.Module):
         mask = y_true_sorted == -float('inf')
 
         preds_sorted_by_true = torch.gather(y_pred_shuffled, dim=1, index=indices)
-        preds_sorted_by_true[mask] = -float("inf")
+        preds_sorted_by_true[mask] = -float('inf')
 
         max_pred_values, _ = preds_sorted_by_true.max(dim=1, keepdim=True)
 
@@ -178,10 +178,9 @@ def cl_forward(cls,
     return_dict=None,
     mlm_input_ids=None,
     mlm_labels=None,
-    anchor=None,
-    p1=None,
-    p2=None,
-    p3=None,
+    parent=None,
+    left=None,
+    right=None,
 ):
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
     ori_input_ids = input_ids
@@ -228,10 +227,10 @@ def cl_forward(cls,
     pooler_output = cls.pooler(attention_mask, outputs)
     pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
 
+    # Tree-based positive ensembling
     if cls.model_args.trees:
-        # Tree-based ensembling
         anchor_output, ensemble_output = torch.split(pooler_output, split_size_or_sections=[1, num_sent - 1], dim=1)  # (bs, 1, hidden) and (bs, num_sent - 1, hidden)
-        left_output, *_, right_output = torch.split(torch.clone(ensemble_output), split_size_or_sections=[1 for _ in range(num_sent - 1)], dim=1) # (bs, num_sent - 1, hidden) -> (bs, 1, hidden) and (bs, 1, hidden)
+        left_output, right_output = torch.split(torch.clone(ensemble_output), split_size_or_sections=[1 for _ in range(num_sent - 1)], dim=1) # (bs, num_sent - 1, hidden) -> (bs, 1, hidden) and (bs, 1, hidden)
         ensemble_output = ensemble_output.sum(dim=1, keepdim=True) # (bs, num_sent - 1, hidden) -> (bs, 1, hidden)
         pooler_output = torch.cat((anchor_output, ensemble_output, left_output, right_output), dim=1) # (bs, 4, hidden)
 
@@ -241,30 +240,81 @@ def cl_forward(cls,
         pooler_output = cls.mlp(pooler_output)
 
     # Separate representation
-    z1, z2, z3, z4 = pooler_output[:,0], pooler_output[:,1], pooler_output[:,2], pooler_output[:,3]
+    z1, z2 = pooler_output[:,0], pooler_output[:,1]
 
-    # Contrastive loss
+    # Second positive example
+    if num_sent == 3:
+        z3 = pooler_output[:,2]
+        z4 = pooler_output[:,3]
+
+    # Gather all embeddings if using distributed training
+    if dist.is_initialized() and cls.training:
+        # Gather second positive
+        if num_sent >= 3:
+            z3_list = [torch.zeros_like(z3) for _ in range(dist.get_world_size())]
+            dist.all_gather(tensor_list=z3_list, tensor=z3.contiguous())
+            z3_list[dist.get_rank()] = z3
+            z3 = torch.cat(z3_list, 0)
+
+            z4_list = [torch.zeros_like(z4) for _ in range(dist.get_world_size())]
+            dist.all_gather(tensor_list=z4_list, tensor=z4.contiguous())
+            z4_list[dist.get_rank()] = z4
+            z4 = torch.cat(z4_list, 0)
+
+        # Dummy vectors for allgather
+        z1_list = [torch.zeros_like(z1) for _ in range(dist.get_world_size())]
+        z2_list = [torch.zeros_like(z2) for _ in range(dist.get_world_size())]
+        # Allgather
+        dist.all_gather(tensor_list=z1_list, tensor=z1.contiguous())
+        dist.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
+
+        # Since allgather results do not have gradients, we replace the
+        # current process's corresponding embeddings with original tensors
+        z1_list[dist.get_rank()] = z1
+        z2_list[dist.get_rank()] = z2
+        # Get full batch embeddings: (bs x N, hidden)
+        z1 = torch.cat(z1_list, 0)
+        z2 = torch.cat(z2_list, 0)
+
+    # Contrastive loss with text embedding and sum of embeddings of constituents as positives
     cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
     labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
 
     loss_fct = nn.CrossEntropyLoss()
     loss = loss_fct(cos_sim, labels)
 
-    # Knowledge distillation
-    distillation_loss_fct = ListMLELoss() # SoftCrossEntropyLoss()
-    loss = loss + (cls.model_args.kd_weight * distillation_loss_fct(anchor.to(cls.device), (p1 + p2 + p3).to(cls.device), z1, z2))
+    # Contrastive loss with non-overlapping constituents
+    cos_sim_inner = cls.sim(z3.unsqueeze(1), z4.unsqueeze(0))
+    labels_inner = torch.clone(labels)
 
-    # Self-distillation
+    loss_fct = nn.CrossEntropyLoss()
+    loss = loss + loss_fct(cos_sim_inner, labels_inner)
+
+    # Negative example ranking distillation - text embedding and sum of embeddings of constituents
+    distillation_loss_fct = ListMLELoss() # SoftCrossEntropyLoss(cls.model_args.student_temp, cls.model_args.teacher_temp)
+    kd_loss = distillation_loss_fct(parent.to(cls.device), (left + right).to(cls.device), z1, z2)
+
+    # Negative example ranking distilation - non-overlapping constituents
+    distillation_loss_fct = ListMLELoss()
+    kd_loss = kd_loss +  distillation_loss_fct(left.to(cls.device), right.to(cls.device), z3, z4)
+    kd_loss = 0.5 * kd_loss
+
+    # Self-distillation - text embedding and sum of embeddings of constituents
     cos_sim_anchor_left = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
     cos_sim_ensemble_left = cls.sim(z2.unsqueeze(1), z3.unsqueeze(0))
 
+    # Self-distillation - non-overlapping constituents
     cos_sim_anchor_right = cls.sim(z1.unsqueeze(1), z4.unsqueeze(0))
     cos_sim_ensemble_right = cls.sim(z2.unsqueeze(1), z4.unsqueeze(0))
 
     js_div = cls.div(F.softmax(cos_sim_anchor_left, dim=-1), F.softmax(cos_sim_ensemble_left, dim=-1))
     js_div = js_div + cls.div(F.softmax(cos_sim_anchor_right, dim=-1), F.softmax(cos_sim_ensemble_right, dim=-1))
     js_div = 0.5 * js_div
-    loss = loss + (cls.model_args.sd_weight * js_div)
+
+    # L = L_infoNCE + beta*L_consistency + gamma*L_distillation
+    loss = loss + (cls.model_args.sd_weight * js_div) + (cls.model_args.kd_weight * kd_loss)
+
+    # TODO: maybe? Relation prediction
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:
@@ -352,10 +402,9 @@ class BertForCL(BertPreTrainedModel):
         sent_emb=False,
         mlm_input_ids=None,
         mlm_labels=None,
-        anchor=None,
-        p1=None,
-        p2=None,
-        p3=None,
+        parent=None,
+        left=None,
+        right=None,
     ):
         if sent_emb:
             return sentemb_forward(self, self.bert,
@@ -384,10 +433,9 @@ class BertForCL(BertPreTrainedModel):
                 return_dict=return_dict,
                 mlm_input_ids=mlm_input_ids,
                 mlm_labels=mlm_labels,
-                anchor=anchor,
-                p1=p1,
-                p2=p2,
-                p3=p3,
+                parent=parent,
+                left=left,
+                right=right,
             )
 
 class RobertaForCL(RobertaPreTrainedModel):

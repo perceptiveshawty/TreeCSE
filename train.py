@@ -36,7 +36,6 @@ from transformers.data.data_collator import DataCollatorForLanguageModeling
 from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
 from treecse.models import RobertaForCL, BertForCL
 from treecse.trainers import CLTrainer
-# from treecse.teachers import Teacher
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -87,12 +86,6 @@ class ModelArguments:
     )
 
     # TreeCSE's arguments
-    trees: bool = field(
-        default=True,
-        metadata={
-            "help": "Whether or not to use the tree-based sampling for unsupervised training"
-        },
-    )
     sd_weight: float = field(
         default=1.0,
         metadata={
@@ -105,7 +98,31 @@ class ModelArguments:
             "help": "Weight for the soft knowledge distillation loss"
         },
     )
+    student_temp: float = field(
+        default=0.025,
+        metadata={
+            "help": "Temperature for student's softmax."
+        }
+    )
+    teacher_temp: float = field(
+        default=0.0125,
+        metadata={
+            "help": "Temperature for teacher's softmax."
+        }
+    )
+    trees: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether or not to use the tree-based sampling for unsupervised training"
+        },
+    )
+    teacher_name_or_path: Optional[str] = field(
+        default="princeton-nlp/unsup-simcse-bert-base-uncased",
+        metadata={
+            "help": "The model checkpoint of the teacher for distilling ranking knowledge."
 
+        }
+    )
 
     # SimCSE's arguments
     temp: float = field(
@@ -144,7 +161,6 @@ class ModelArguments:
             "help": "Use MLP only during training"
         }
     )
-
 
 @dataclass
 class DataTrainingArguments:
@@ -204,7 +220,6 @@ class DataTrainingArguments:
             if self.train_file is not None:
                 extension = self.train_file.split(".")[-1]
                 assert extension in ["csv", "json", "txt"], "`train_file` should be a csv, a json or a txt file."
-
 
 @dataclass
 class OurTrainingArguments(TrainingArguments):
@@ -404,16 +419,13 @@ def main():
 
     # Prepare features
     column_names = datasets['train'].column_names
-    sent3_cname, sent4_cname = None, None
+    sent2_cname = None
     if len(column_names) == 3: 
-        # A = B + C
+        # P = L + R
         sent0_cname, sent1_cname, sent2_cname = column_names
-    elif len(column_names) == 4:
-        # A = B + C + D
-        sent0_cname, sent1_cname, sent2_cname, sent3_cname = column_names
-    elif len(column_names) == 5:
-        # A = B + C + D + E
-        sent0_cname, sent1_cname, sent2_cname, sent3_cname, sent4_cname = column_names
+    elif len(column_names) == 2:
+        # P = P
+        sent0_cname, sent1_cname = column_names
     else:
         raise NotImplementedError
 
@@ -432,21 +444,15 @@ def main():
                 examples[sent0_cname][idx] = " "
             if examples[sent1_cname][idx] is None:
                 examples[sent1_cname][idx] = " "
-            if examples[sent2_cname][idx] is None:
-                examples[sent2_cname][idx] = " "
 
-        sentences = examples[sent0_cname] + examples[sent1_cname] + examples[sent2_cname]
+        sentences = examples[sent0_cname] + examples[sent1_cname]
 
-        if sent3_cname is not None:
+        if sent2_cname is not None:
             for idx in range(total):
-                if examples[sent3_cname][idx] is None:
-                    examples[sent3_cname] = " "
-            sentences += examples[sent3_cname]
-        if sent4_cname is not None:
-            for idx in range(total):
-                if examples[sent4_cname][idx] is None:
-                    examples[sent4_cname][idx] = " "
-            sentences += examples[sent4_cname]
+                if examples[sent2_cname][idx] is None:
+                    examples[sent2_cname] = " "
+            sentences += examples[sent2_cname]
+
 
         sent_features = tokenizer(
             sentences,
@@ -456,17 +462,13 @@ def main():
         )
 
         features = {}
-        
-        if sent4_cname is not None:
-            for key in sent_features:
-                features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2], sent_features[key][i+total*3], sent_features[key][i+total*4]] for i in range(total)]
-        elif sent3_cname is not None:
-            for key in sent_features:
-                features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2], sent_features[key][i+total*3]] for i in range(total)]
-        else:
+        if sent2_cname is not None:
             for key in sent_features:
                 features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)]
-    
+        else:
+            for key in sent_features:
+                features[key] = [[sent_features[key][i], sent_features[key][i+total]] for i in range(total)]
+            
         return features
     
     if training_args.do_train:
@@ -557,6 +559,9 @@ def main():
             return inputs, labels
 
     data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
+
+    training_args.trees = model_args.trees
+    training_args.teacher_name_or_path = model_args.teacher_name_or_path
 
     trainer = CLTrainer(
         model=model,

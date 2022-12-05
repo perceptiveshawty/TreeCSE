@@ -404,7 +404,8 @@ class CLTrainer(Trainer):
                 )
 
         # TODO: Initialize the teacher model here
-        teacher = Teacher()
+        teacher_pooler = ("cls" if ("simcse" in self.args.teacher_name_or_path or "diffcse" in self.args.teacher_name_or_path) else "avg")
+        teacher = Teacher(model_name_or_path=self.args.teacher_name_or_path, pooler=teacher_pooler)
 
         # Update the references
         self.callback_handler.model = self.model
@@ -463,43 +464,37 @@ class CLTrainer(Trainer):
 
 
                 # TODO: pass the ground truth similarity lists obtained by the teacher in inputs["cos_sim"]
-                with torch.no_grad():
+                if self.args.trees:
+                    with torch.no_grad():
 
-                    input_ids = inputs["input_ids"]
-                    attention_mask = inputs["attention_mask"]
-                    token_type_ids = inputs["token_type_ids"]
-
-                    token_type_ids = None
-                    if "token_type_ids" in inputs:
+                        input_ids = inputs["input_ids"]
+                        attention_mask = inputs["attention_mask"]
                         token_type_ids = inputs["token_type_ids"]
-    
-                    batch_size = input_ids.size(0)
-                    num_sent = input_ids.size(1)
 
-                    input_ids = input_ids.view((-1, input_ids.size(-1)))
-                    token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1)))
-                    attention_mask = attention_mask.view((-1, attention_mask.size(-1)))
+                        token_type_ids = None
+                        if "token_type_ids" in inputs:
+                            token_type_ids = inputs["token_type_ids"]
+        
+                        batch_size = input_ids.size(0)
+                        num_sent = input_ids.size(1)
 
-                    teacher_inputs = copy.deepcopy(inputs)
-                    teacher_inputs["input_ids"] = input_ids
-                    teacher_inputs["attention_mask"] = attention_mask
-                    teacher_inputs["token_type_ids"] = token_type_ids
+                        input_ids = input_ids.view((-1, input_ids.size(-1)))
+                        token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1)))
+                        attention_mask = attention_mask.view((-1, attention_mask.size(-1)))
 
-                    embeddings = teacher.encode(teacher_inputs)
-                    embeddings = embeddings.view((batch_size, num_sent, -1))
-                    
-                    anchor, p1, p2, p3 = embeddings[:,0], embeddings[:,1], embeddings[:,2], embeddings[:,3]
+                        teacher_inputs = copy.deepcopy(inputs)
+                        teacher_inputs["input_ids"] = input_ids
+                        teacher_inputs["attention_mask"] = attention_mask
+                        teacher_inputs["token_type_ids"] = token_type_ids
 
-                    # print(anchor.shape)
-                    # print(p1.shape)
-                    # print(p2.shape)
-                    # print(p3.shape)
-                    # assert False
+                        embeddings = teacher.encode(teacher_inputs)
+                        embeddings = embeddings.view((batch_size, num_sent, -1))
+                        
+                        parent, left, right = embeddings[:,0], embeddings[:,1], embeddings[:,2]
 
-                    inputs["anchor"] = anchor
-                    inputs["p1"] = p1
-                    inputs["p2"] = p2
-                    inputs["p3"] = p3
+                        inputs["parent"] = parent
+                        inputs["left"] = left
+                        inputs["right"] = right
 
                 if ((step + 1) % self.args.gradient_accumulation_steps != 0) and self.args.local_rank != -1:
                     # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
