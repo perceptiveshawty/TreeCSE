@@ -126,13 +126,13 @@ class ModelArguments:
     do_kd: bool = field(
         default=False,
         metadata={
-            "help": "Whether or not to use the tree-based sampling for unsupervised training"
+            "help": "Whether or not to incorporate L_distillation"
         },
     )
     do_sd: bool = field(
         default=False,
         metadata={
-            "help": "Whether or not to use the tree-based sampling for unsupervised training"
+            "help": "Whether or not to incorporate L_consistency"
         },
     )
 

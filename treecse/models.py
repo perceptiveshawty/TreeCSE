@@ -277,20 +277,19 @@ def cl_forward(cls,
         z2 = torch.cat(z2_list, 0)
 
     
-    if "unsup" in cls.model_args.teacher_name_or_path:
-        # Contrastive loss with text embedding and sum of embeddings of constituents as positives
-        cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
-        labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
+    # Contrastive loss with text embedding and sum of embeddings of constituents as positives
+    cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+    labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
 
-        loss_fct = nn.CrossEntropyLoss()
-        loss = loss_fct(cos_sim, labels)
-    else:
-        # Contrastive loss with non-overlapping constituents
-        cos_sim = cls.sim(z3.unsqueeze(1), z4.unsqueeze(0))
-        labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
+    loss_fct = nn.CrossEntropyLoss()
+    loss = loss_fct(cos_sim, labels)
 
-        loss_fct = nn.CrossEntropyLoss()
-        loss = loss_fct(cos_sim, labels)
+    # # Contrastive loss with non-overlapping constituents
+    # cos_sim = cls.sim(z3.unsqueeze(1), z4.unsqueeze(0))
+    # labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
+
+    # loss_fct = nn.CrossEntropyLoss()
+    # loss = loss_fct(cos_sim, labels)
 
     if cls.model_args.do_kd:
         # Negative example ranking distillation - text embedding and sum of embeddings of constituents
