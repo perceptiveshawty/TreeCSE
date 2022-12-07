@@ -1,11 +1,9 @@
 from .tool import *
 
 # sentence-transformers/all-mpnet-base-v2
-# sentence-transformers/sentence-t5-base
-# sentence-transformers/sentence-t5-xl
 # voidism/diffcse-bert-base-uncased-sts
 # princeton-nlp/sup-simcse-bert-base-uncased
-# princeton-nlp/unsup-simcse-bert-base-uncased
+# runs/my-sup-promcse-roberta-large
 
 class Teacher(SimCSE):
     """
@@ -42,10 +40,11 @@ class Teacher(SimCSE):
             elif self.pooler == "cls_before_pooler":
                 embeddings = outputs.last_hidden_state[:, 0]
             elif self.pooler == "avg":
+                attention_mask = inputs["attention_mask"]
                 token_embeddings = outputs.last_hidden_state #First element of model_output contains all token embeddings
                 input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
                 sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
-                sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+                sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-7)
                 embeddings = sum_embeddings / sum_mask
                 
             embedding_list.append(embeddings)

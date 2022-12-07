@@ -178,8 +178,8 @@ class CLTrainer(Trainer):
                     self.deepspeed.save_checkpoint(output_dir)
 
                 # Save optimizer and scheduler
-                if self.sharded_dpp:
-                    self.optimizer.consolidate_state_dict()
+                # if self.sharded_dpp:
+                #     self.optimizer.consolidate_state_dict()
 
                 if is_torch_tpu_available():
                     xm.rendezvous("saving_optimizer_states")
@@ -220,8 +220,8 @@ class CLTrainer(Trainer):
                 self.deepspeed.save_checkpoint(output_dir)
 
             # Save optimizer and scheduler
-            if self.sharded_dpp:
-                self.optimizer.consolidate_state_dict()
+            # if self.sharded_dpp:
+            #     self.optimizer.consolidate_state_dict()
 
             if is_torch_tpu_available():
                 xm.rendezvous("saving_optimizer_states")
@@ -331,8 +331,8 @@ class CLTrainer(Trainer):
             model = torch.nn.DataParallel(model)
 
         # Distributed training (should be after apex fp16 initialization)
-        if self.sharded_dpp:
-            model = ShardedDDP(model, self.optimizer)
+        # if self.sharded_dpp:
+        #     model = ShardedDDP(model, self.optimizer)
         elif self.args.local_rank != -1:
             model = torch.nn.parallel.DistributedDataParallel(
                 model,
@@ -513,9 +513,9 @@ class CLTrainer(Trainer):
                     if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0 and not self.deepspeed:
                         # deepspeed does its own clipping
 
-                        if self.use_amp:
-                            # AMP: gradients need unscaling
-                            self.scaler.unscale_(self.optimizer)
+                        # if self.use_amp:
+                        #     # AMP: gradients need unscaling
+                        #     self.scaler.unscale_(self.optimizer)
 
                         if hasattr(self.optimizer, "clip_grad_norm"):
                             # Some optimizers (like the sharded optimizer) have a specific way to do gradient clipping
@@ -530,9 +530,9 @@ class CLTrainer(Trainer):
                     # Optimizer step
                     if is_torch_tpu_available():
                         xm.optimizer_step(self.optimizer)
-                    elif self.use_amp:
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
+                    # elif self.use_amp:
+                    #     self.scaler.step(self.optimizer)
+                    #     self.scaler.update()
                     else:
                         self.optimizer.step()
                     

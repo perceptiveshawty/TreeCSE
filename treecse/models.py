@@ -58,7 +58,7 @@ class Divergence(nn.Module):
         # p, q = p.to(torch.float32), q.to(torch.float32)
         p, q = p.view(-1, p.size(-1)), q.view(-1, q.size(-1))
         m = (0.5 * (p + q)).log().clamp(min=self.eps)
-        return 0.5 * (self.kl(m, p.log().clamp(min=self.eps)) + self.kl(m, q.log().clamp(min=self.eps)))
+        return 0.5 * (self.kl(m, p.log()) + self.kl(m, q.log()))
 
 class SoftCrossEntropyLoss(nn.Module):
     def __init__(self, tau2, tau3):
@@ -276,43 +276,50 @@ def cl_forward(cls,
         z1 = torch.cat(z1_list, 0)
         z2 = torch.cat(z2_list, 0)
 
-    # Contrastive loss with text embedding and sum of embeddings of constituents as positives
-    cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
-    labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
+    
+    if "unsup" in cls.model_args.teacher_name_or_path:
+        # Contrastive loss with text embedding and sum of embeddings of constituents as positives
+        cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+        labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
 
-    loss_fct = nn.CrossEntropyLoss()
-    loss = loss_fct(cos_sim, labels)
+        loss_fct = nn.CrossEntropyLoss()
+        loss = loss_fct(cos_sim, labels)
+    else:
+        # Contrastive loss with non-overlapping constituents
+        cos_sim = cls.sim(z3.unsqueeze(1), z4.unsqueeze(0))
+        labels = torch.arange(cos_sim.size(0)).long().to(cls.device)
 
-    # Contrastive loss with non-overlapping constituents
-    cos_sim_inner = cls.sim(z3.unsqueeze(1), z4.unsqueeze(0))
-    labels_inner = torch.clone(labels)
+        loss_fct = nn.CrossEntropyLoss()
+        loss = loss_fct(cos_sim, labels)
 
-    loss_fct = nn.CrossEntropyLoss()
-    loss = loss + loss_fct(cos_sim_inner, labels_inner)
+    if cls.model_args.do_kd:
+        # Negative example ranking distillation - text embedding and sum of embeddings of constituents
+        distillation_loss_fct = ListMLELoss() # SoftCrossEntropyLoss(cls.model_args.student_temp, cls.model_args.teacher_temp)
+        kd_loss = distillation_loss_fct(parent.to(cls.device), (left + right).to(cls.device), z1, z2)
 
-    # Negative example ranking distillation - text embedding and sum of embeddings of constituents
-    distillation_loss_fct = ListMLELoss() # SoftCrossEntropyLoss(cls.model_args.student_temp, cls.model_args.teacher_temp)
-    kd_loss = distillation_loss_fct(parent.to(cls.device), (left + right).to(cls.device), z1, z2)
+        # Negative example ranking distilation - non-overlapping constituents
+        distillation_loss_fct = ListMLELoss()
+        kd_loss = kd_loss +  distillation_loss_fct(left.to(cls.device), right.to(cls.device), z3, z4)
+        kd_loss = 0.5 * kd_loss
+        loss = loss + cls.model_args.kd_weight * kd_loss
 
-    # Negative example ranking distilation - non-overlapping constituents
-    distillation_loss_fct = ListMLELoss()
-    kd_loss = kd_loss +  distillation_loss_fct(left.to(cls.device), right.to(cls.device), z3, z4)
-    kd_loss = 0.5 * kd_loss
+    if cls.model_args.do_sd:
+        # Self-distillation - text embedding and sum of embeddings of constituents	
+        cos_sim_anchor_left = mask_diagonal(cls.sim(z1.unsqueeze(1), z3.unsqueeze(0)))	
+        cos_sim_ensemble_left = mask_diagonal(cls.sim(z2.unsqueeze(1), z3.unsqueeze(0)))
 
-    # Self-distillation - text embedding and sum of embeddings of constituents
-    cos_sim_anchor_left = cls.sim(z1.unsqueeze(1), z3.unsqueeze(0))
-    cos_sim_ensemble_left = cls.sim(z2.unsqueeze(1), z3.unsqueeze(0))
+        # Self-distillation - non-overlapping constituents	
+        cos_sim_anchor_right = mask_diagonal(cls.sim(z1.unsqueeze(1), z4.unsqueeze(0)))	
+        cos_sim_ensemble_right = mask_diagonal(cls.sim(z2.unsqueeze(1), z4.unsqueeze(0)))
 
-    # Self-distillation - non-overlapping constituents
-    cos_sim_anchor_right = cls.sim(z1.unsqueeze(1), z4.unsqueeze(0))
-    cos_sim_ensemble_right = cls.sim(z2.unsqueeze(1), z4.unsqueeze(0))
-
-    js_div = cls.div(F.softmax(cos_sim_anchor_left, dim=-1), F.softmax(cos_sim_ensemble_left, dim=-1))
-    js_div = js_div + cls.div(F.softmax(cos_sim_anchor_right, dim=-1), F.softmax(cos_sim_ensemble_right, dim=-1))
-    js_div = 0.5 * js_div
+        sd_loss = cls.div(cos_sim_anchor_left.softmax(dim=-1).clamp(min=1e-6), cos_sim_ensemble_left.softmax(dim=-1).clamp(min=1e-6))
+        sd_loss = sd_loss + cls.div(cos_sim_anchor_right.softmax(dim=-1).clamp(min=1e-6), cos_sim_ensemble_right.softmax(dim=-1).clamp(min=1e-6))
+        sd_loss = 0.5 * sd_loss
+        loss = loss + cls.model_args.sd_weight * sd_loss
 
     # L = L_infoNCE + beta*L_consistency + gamma*L_distillation
-    loss = loss + (cls.model_args.sd_weight * js_div) + (cls.model_args.kd_weight * kd_loss)
+    # loss = loss + (cls.model_args.kd_weight * kd_loss)
+    # loss = loss + (cls.model_args.sd_weight * js_div) + (cls.model_args.kd_weight * kd_loss)
 
     # TODO: maybe? Relation prediction
 
