@@ -71,122 +71,6 @@ def merge_edus(items, k=3): # auxiliary function to combine adjacent shortest ed
         return items
 
 
-def make_simcse_rst_dataset(output_dir):
-    examples = []
-    with open(os.path.join(output_dir, 'wiki1m_for_simcse.txt'), 'r') as p_, open(os.path.join(output_dir, 'tokenization.txt'), 'r') as t_, open(os.path.join(output_dir, 'segmentation.txt'), 'r') as e_, open(os.path.join(output_dir, 'tree.txt'), 'r') as s_:
-        orig_examples, rst_tokens, rst_edus, rst_rels = p_.readlines(), t_.readlines(), e_.readlines(), s_.readlines()
-    
-    for index, ex in enumerate(orig_examples):
-        try:
-            tokenization = rst_tokens[index].strip()[1:-1].split(", ")
-            tokenization = [t[1:-1] for t in tokenization]
-            segmentation = [int(k) for k in rst_edus[index].strip()[1:-1].split(", ")]
-            parsetree = rst_rels[index].strip()[2:-2].split()
-            rst_example = RST.from_data(tokenization, segmentation, parsetree)
-        except:
-            continue
-        
-        left_arg_edus, right_arg_edus, all_schemes = RST.all_rst_cutouts(rst_example)
-
-        for lae, rae in zip(left_arg_edus, right_arg_edus):
-            all_edus = [e.text for e in lae] + [e.text for e in rae]
-            anchor = " ".join(all_edus)
-            p1, p2 = merge_edus(all_edus, k=2)
-            examples.append({'anchor' : anchor, 'pos1' : p1, 'pos2' : ' ', 'pos3' : p2})
-
-    with open(os.path.join(output_dir, 'full_data_for_cse.json'), 'w') as jout:
-        ndjson.dump(examples, jout)
-
-def make_full_rst_dataset(output_dir):
-    examples = []
-    with open(os.path.join(output_dir, 'passages.txt'), 'r') as p_, open(os.path.join(output_dir, 'tokenization.txt'), 'r') as t_, open(os.path.join(output_dir, 'segmentation.txt'), 'r') as e_, open(os.path.join(output_dir, 'tree.txt'), 'r') as s_:
-        orig_examples, rst_tokens, rst_edus, rst_rels = p_.readlines(), t_.readlines(), e_.readlines(), s_.readlines()
-    
-    for index, ex in enumerate(orig_examples):
-        try:
-            tokenization = rst_tokens[index].strip()[1:-1].split(", ")
-            tokenization = [t[1:-1] for t in tokenization]
-            segmentation = [int(k) for k in rst_edus[index].strip()[1:-1].split(", ")]
-            parsetree = rst_rels[index].strip()[2:-2].split()
-            rst_example = RST.from_data(tokenization, segmentation, parsetree)
-        except:
-            continue
-        
-        all_left_args, all_right_args, all_schemes = RST.all_rst_cutouts(rst_example)
-        all_cutouts_valid = [(sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]), left_, right_, scheme_) for left_, right_, scheme_ in zip(all_left_args, all_right_args, all_schemes) if sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]) > 20]
-        _, left_arg_edus, right_arg_edus, _ = zip(*sorted(all_cutouts_valid, key=lambda x:x[0], reverse=True))
-
-        for lae, rae in zip(left_arg_edus, right_arg_edus):
-            all_edus = [e.text for e in lae] + [e.text for e in rae]
-            anchor = " ".join(all_edus)
-            p1, p2, p3 = merge_edus(all_edus)
-            examples.append({'anchor' : anchor, 'pos1' : p1, 'pos2' : p2, 'pos3' : p3})
-
-    with open(os.path.join(output_dir, 'full_data_for_cse.json'), 'w') as jout:
-        ndjson.dump(examples, jout)
-
-def make_shallow_rst_dataset(output_dir):
-    examples = []
-    with open(os.path.join(output_dir, 'passages.txt'), 'r') as p_, open(os.path.join(output_dir, 'tokenization.txt'), 'r') as t_, open(os.path.join(output_dir, 'segmentation.txt'), 'r') as e_, open(os.path.join(output_dir, 'tree.txt'), 'r') as s_:
-        orig_examples, rst_tokens, rst_edus, rst_rels = p_.readlines(), t_.readlines(), e_.readlines(), s_.readlines()
-    
-    for index, ex in enumerate(orig_examples):
-        try:
-            tokenization = rst_tokens[index].strip()[1:-1].split(", ")
-            tokenization = [t[1:-1] for t in tokenization]
-            segmentation = [int(k) for k in rst_edus[index].strip()[1:-1].split(", ")]
-            parsetree = rst_rels[index].strip()[2:-2].split()
-            rst_example = RST.from_data(tokenization, segmentation, parsetree)
-        except:
-            continue
-
-        all_left_args, all_right_args, all_schemes = RST.all_rst_cutouts(rst_example)
-        all_cutouts_valid = [(sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]), left_, right_, scheme_) for left_, right_, scheme_ in zip(all_left_args, all_right_args, all_schemes) if sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]) > 40]
-        _, left_arg_edus, right_arg_edus, _ = zip(*sorted(all_cutouts_valid, key=lambda x:x[0], reverse=True))
-
-        deep = 0
-        for lae, rae in zip(left_arg_edus, right_arg_edus):
-            if deep <= len(left_arg_edus) // 2:
-                all_edus = [e.text for e in lae] + [e.text for e in rae]
-                anchor = " ".join(all_edus)
-                p1, p2, p3 = merge_edus(all_edus)
-                examples.append({'anchor' : anchor, 'pos1' : p1, 'pos2' : p2, 'pos3' : p3})
-            deep += 1
-
-    with open(os.path.join(output_dir, 'shallow_data_for_cse.json'), 'w') as jout:
-        ndjson.dump(examples, jout)
-
-def make_deep_rst_dataset(output_dir):
-    examples = []
-    with open(os.path.join(output_dir, 'passages.txt'), 'r') as p_, open(os.path.join(output_dir, 'tokenization.txt'), 'r') as t_, open(os.path.join(output_dir, 'segmentation.txt'), 'r') as e_, open(os.path.join(output_dir, 'tree.txt'), 'r') as s_:
-        orig_examples, rst_tokens, rst_edus, rst_rels = p_.readlines(), t_.readlines(), e_.readlines(), s_.readlines()
-    
-    for index, ex in enumerate(orig_examples):
-        try:
-            tokenization = rst_tokens[index].strip()[1:-1].split(", ")
-            tokenization = [t[1:-1] for t in tokenization]
-            segmentation = [int(k) for k in rst_edus[index].strip()[1:-1].split(", ")]
-            parsetree = rst_rels[index].strip()[2:-2].split()
-            rst_example = RST.from_data(tokenization, segmentation, parsetree)
-        except:
-            continue
-
-        all_left_args, all_right_args, all_schemes = RST.all_rst_cutouts(rst_example)
-        all_cutouts_valid = [(sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]), left_, right_, scheme_) for left_, right_, scheme_ in zip(all_left_args, all_right_args, all_schemes) if sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]) > 40]
-        _, left_arg_edus, right_arg_edus, _ = zip(*sorted(all_cutouts_valid, key=lambda x:x[0], reverse=False))
-
-        deep = 0
-        for lae, rae in zip(left_arg_edus, right_arg_edus):
-            if deep <= len(left_arg_edus) // 2:
-                all_edus = [e.text for e in lae] + [e.text for e in rae]
-                anchor = " ".join(all_edus)
-                p1, p2, p3 = merge_edus(all_edus)
-                examples.append({'anchor' : anchor, 'pos1' : p1, 'pos2' : p2, 'pos3' : p3})
-            deep += 1
-
-    with open(os.path.join(output_dir, 'deep_data_for_cse.json'), 'w') as jout:
-        ndjson.dump(examples, jout)
-
 def make_rst_dataset(output_dir, strategy):
     examples = []
     path_to_sentences = 'wiki1m_for_simcse.txt' if strategy == 'simcse' else 'passages.txt'
@@ -220,12 +104,11 @@ def make_rst_dataset(output_dir, strategy):
             left_arg_edus, right_arg_edus, all_schemes = RST.all_rst_cutouts(rst_example)
 
             for lae, rae in zip(left_arg_edus, right_arg_edus):
-                all_edus = [e.text for e in lae] + [e.text for e in rae]
-                parent = " ".join(all_edus)
-                left, right = merge_edus(all_edus, k=2)
-                examples.append({'parent' : parent, 'left' : left, 'right' : right})
+                left, right = [e.text for e in lae], [e.text for e in rae]
+                parent = " ".join(left + right)
+                examples.append({'parent' : parent, 'left' : " ".join(left), 'right' : " ".join(right)})
 
-    with open(os.path.join(output_dir, 'rst_data_for_cse.json'), 'w') as jout:
+    with open(os.path.join(output_dir, 'rst_data_for_csev2.json'), 'w') as jout:
         ndjson.dump(examples, jout)
 
 if __name__ == '__main__':

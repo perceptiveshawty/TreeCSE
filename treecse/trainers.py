@@ -220,8 +220,8 @@ class CLTrainer(Trainer):
                 self.deepspeed.save_checkpoint(output_dir)
 
             # Save optimizer and scheduler
-            # if self.sharded_dpp:
-            #     self.optimizer.consolidate_state_dict()
+            if self.sharded_dpp:
+                self.optimizer.consolidate_state_dict()
 
             if is_torch_tpu_available():
                 xm.rendezvous("saving_optimizer_states")
@@ -331,8 +331,8 @@ class CLTrainer(Trainer):
             model = torch.nn.DataParallel(model)
 
         # Distributed training (should be after apex fp16 initialization)
-        # if self.sharded_dpp:
-        #     model = ShardedDDP(model, self.optimizer)
+        if self.sharded_dpp:
+            model = ShardedDDP(model, self.optimizer)
         elif self.args.local_rank != -1:
             model = torch.nn.parallel.DistributedDataParallel(
                 model,
@@ -403,9 +403,16 @@ class CLTrainer(Trainer):
                     "batches in the first epoch."
                 )
 
-        # TODO: Initialize the teacher model here
-        teacher_pooler = ("cls" if ("simcse" in self.args.teacher_name_or_path or "diffcse" in self.args.teacher_name_or_path) else "avg")
-        teacher = Teacher(model_name_or_path=self.args.teacher_name_or_path, pooler=teacher_pooler)
+        # TreeCSE - Initialize the teacher
+        teacher = None
+        if self.args.second_teacher_name_or_path is None:
+            teacher_pooler = ("cls_before_pooler" if ("simcse" in self.args.first_teacher_name_or_path or "diffcse" in self.args.first_teacher_name_or_path) else "avg")
+            teacher = Teacher(model_name_or_path=self.args.first_teacher_name_or_path, pooler=teacher_pooler)
+        else:
+            first_pooler = ("cls_before_pooler" if ("simcse" in self.args.first_teacher_name_or_path or "diffcse" in self.args.first_teacher_name_or_path) else "avg")
+            first_teacher = Teacher(model_name_or_path=self.args.first_teacher_name_or_path, pooler=first_pooler)
+            second_pooler = ("cls_before_pooler" if ("simcse" in self.args.second_teacher_name_or_path or "diffcse" in self.args.second_teacher_name_or_path) else "avg")
+            second_teacher = Teacher(model_name_or_path=self.args.second_teacher_name_or_path, pooler=second_pooler)
 
         # Update the references
         self.callback_handler.model = self.model
@@ -463,38 +470,48 @@ class CLTrainer(Trainer):
                     self.control = self.callback_handler.on_step_begin(self.args, self.state, self.control)
 
 
-                # TODO: pass the ground truth similarity lists obtained by the teacher in inputs["cos_sim"]
-                if self.args.trees:
-                    with torch.no_grad():
+                # TreeCSE: pass the embeddings obtained by the teacher to the student
+                with torch.no_grad():
 
-                        input_ids = inputs["input_ids"]
-                        attention_mask = inputs["attention_mask"]
+                    # Read batch inputs
+                    input_ids = inputs["input_ids"]
+                    attention_mask = inputs["attention_mask"]
+
+                    token_type_ids = None
+                    if "token_type_ids" in inputs:
                         token_type_ids = inputs["token_type_ids"]
 
-                        token_type_ids = None
-                        if "token_type_ids" in inputs:
-                            token_type_ids = inputs["token_type_ids"]
-        
-                        batch_size = input_ids.size(0)
-                        num_sent = input_ids.size(1)
+                    batch_size = input_ids.size(0)
+                    num_sent = input_ids.size(1)
 
-                        input_ids = input_ids.view((-1, input_ids.size(-1)))
-                        token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1)))
-                        attention_mask = attention_mask.view((-1, attention_mask.size(-1)))
+                    # Flatten input for encoding by the teacher - (bsz * num_sent, len)
+                    input_ids = input_ids.view((-1, input_ids.size(-1))) 
+                    token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1))) 
+                    attention_mask = attention_mask.view((-1, attention_mask.size(-1)))
 
-                        teacher_inputs = copy.deepcopy(inputs)
-                        teacher_inputs["input_ids"] = input_ids
-                        teacher_inputs["attention_mask"] = attention_mask
-                        teacher_inputs["token_type_ids"] = token_type_ids
+                    teacher_inputs = copy.deepcopy(inputs)
+                    teacher_inputs["input_ids"] = input_ids
+                    teacher_inputs["attention_mask"] = attention_mask
+                    teacher_inputs["token_type_ids"] = token_type_ids
 
+                    # Encode, unflatten, and pass to student
+                    if teacher is not None:
+                        # Single teacher
                         embeddings = teacher.encode(teacher_inputs)
                         embeddings = embeddings.view((batch_size, num_sent, -1))
-                        
-                        parent, left, right = embeddings[:,0], embeddings[:,1], embeddings[:,2]
+                        if self.args.fp16:
+                            embeddings = embeddings.to(torch.float16)
+                        zPT, zLT, zRT, zPT_, zLT_, zRT_ = torch.split(embeddings, split_size_or_sections=1, dim=1)
+                    else:
+                        # Weighted average of two teachers
+                        raise NotImplementedError
 
-                        inputs["parent"] = parent
-                        inputs["left"] = left
-                        inputs["right"] = right
+                    inputs["zPT"] = zPT.squeeze()
+                    inputs["zLT"] = zLT.squeeze()
+                    inputs["zRT"] = zRT.squeeze()
+                    inputs["zPT_"] = zPT_.squeeze()
+                    inputs["zLT_"] = zLT_.squeeze()
+                    inputs["zRT_"] = zRT_.squeeze()
 
                 if ((step + 1) % self.args.gradient_accumulation_steps != 0) and self.args.local_rank != -1:
                     # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
@@ -513,9 +530,9 @@ class CLTrainer(Trainer):
                     if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0 and not self.deepspeed:
                         # deepspeed does its own clipping
 
-                        # if self.use_amp:
-                        #     # AMP: gradients need unscaling
-                        #     self.scaler.unscale_(self.optimizer)
+                        if self.use_amp:
+                            # AMP: gradients need unscaling
+                            self.scaler.unscale_(self.optimizer)
 
                         if hasattr(self.optimizer, "clip_grad_norm"):
                             # Some optimizers (like the sharded optimizer) have a specific way to do gradient clipping
@@ -530,9 +547,9 @@ class CLTrainer(Trainer):
                     # Optimizer step
                     if is_torch_tpu_available():
                         xm.optimizer_step(self.optimizer)
-                    # elif self.use_amp:
-                    #     self.scaler.step(self.optimizer)
-                    #     self.scaler.update()
+                    elif self.use_amp:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
                     else:
                         self.optimizer.step()
                     

@@ -86,44 +86,73 @@ class ModelArguments:
     )
 
     # TreeCSE's arguments
-    sd_weight: float = field(
-        default=1.0,
+    first_teacher_name_or_path: str = field(
+        default="voidism/diffcse-bert-base-uncased-sts",
         metadata={
-            "help": "Weight for the self-distillation / consistency loss"
+            "help": "The model checkpoint for weights of the first teacher model. The embeddings of this model are weighted by alpha. This can be any transformers-based model; preferably one trained to yield sentence embeddings."
         },
     )
-    kd_weight: float = field(
-        default=1.0,
+    second_teacher_name_or_path: str = field(
+        default=None,
         metadata={
-            "help": "Weight for the soft knowledge distillation loss"
+            "help": "The model checkpoint for weights of the second teacher model. If set to None, just the first teacher is used. The embeddings of this model are weighted by (1 - alpha). This can be any transformers-based model; preferably one trained to yield sentence embeddings."
+        }
+    )
+    distillation_loss: str = field(
+        default="listnet",
+        metadata={
+            "help": "Which loss function to use for ranking distillation."
         },
     )
-    student_temp: float = field(
-        default=0.025,
+    tau2: float = field(
+        default=0.05,
         metadata={
-            "help": "Temperature for student's softmax."
+            "help": "Temperature for softmax used in ranking distillation (same as tau_2 in paper). When training with the ListMLE loss, tau3 is set to 0.5 * tau2, following the observations stated in Section 5.3. "
+        },
+    )
+    alpha_: float = field(
+        default=float(1/3),
+        metadata={
+            "help": "Coefficient to compute a weighted average of similarity scores obtained from the teachers."
         }
     )
-    teacher_temp: float = field(
-        default=0.0125,
+    beta_: float = field(
+        default=1.0,
         metadata={
-            "help": "Temperature for teacher's softmax."
+            "help": "Coefficient used to weight ranking consistency loss"
         }
     )
-    trees: bool = field(
+    gamma_: float = field(
+        default=1.0,
+        metadata={
+            "help": "Coefficient used to weight ranking distillation loss"
+        }
+    )
+    delta_: float = field(
+        default=1.345,
+        metadata={
+            "help": "-"
+        }
+    )
+    blur: float = field(
+        default=0.75,
+        metadata={
+            "help": "Interpolation coefficient for sinkhorn divergence <--> W2 Distance"
+        }
+    )
+    do_nce: bool = field(
         default=False,
         metadata={
-            "help": "Whether or not to use the tree-based sampling for unsupervised training"
+            "help": "Whether or not to incorporate L_distillation"
         },
     )
-    teacher_name_or_path: Optional[str] = field(
-        default="princeton-nlp/unsup-simcse-bert-base-uncased",
-        metadata={
-            "help": "The model checkpoint of the teacher for distilling ranking knowledge."
-
-        }
-    )
     do_kd: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether or not to incorporate L_distillation"
+        },
+    )
+    do_rkd: bool = field(
         default=False,
         metadata={
             "help": "Whether or not to incorporate L_distillation"
@@ -133,6 +162,18 @@ class ModelArguments:
         default=False,
         metadata={
             "help": "Whether or not to incorporate L_consistency"
+        },
+    )
+    nce_parent_only: bool = field(
+        default=False,
+        metadata={
+            "help": "na"
+        },
+    )
+    cross_distill: bool = field(
+        default=False,
+        metadata={
+            "help": "na"
         },
     )
 
@@ -357,7 +398,7 @@ def main():
     if extension == "csv":
         datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/", delimiter="\t" if "tsv" in data_args.train_file else ",")
     else:
-        datasets = load_dataset(extension, data_files=data_files, cache_dir="/scratch/user/chanchanis/TreeCSE/data/")
+        datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/")
 
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
@@ -407,8 +448,7 @@ def main():
                 use_auth_token=True if model_args.use_auth_token else None,
                 model_args=model_args                  
             )
-        else:
-        # elif 'bert' in model_args.model_name_or_path:
+        elif 'bert' in model_args.model_name_or_path:
             model = BertForCL.from_pretrained(
                 model_args.model_name_or_path,
                 from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -421,8 +461,8 @@ def main():
             if model_args.do_mlm:
                 pretrained_model = BertForPreTraining.from_pretrained(model_args.model_name_or_path)
                 model.lm_head.load_state_dict(pretrained_model.cls.predictions.state_dict())
-        # else:
-        #     raise NotImplementedError
+        else:
+            raise NotImplementedError
     else:
         raise NotImplementedError
         logger.info("Training new model from scratch")
@@ -432,13 +472,10 @@ def main():
 
     # Prepare features
     column_names = datasets['train'].column_names
-    sent2_cname = None
     if len(column_names) == 3: 
-        # P = L + R
+        # Parent, Left, Right
         sent0_cname, sent1_cname, sent2_cname = column_names
-    elif len(column_names) == 2:
-        # P = P
-        sent0_cname, sent1_cname = column_names
+        sent3_cname, sent4_cname, sent5_cname = column_names
     else:
         raise NotImplementedError
 
@@ -457,15 +494,10 @@ def main():
                 examples[sent0_cname][idx] = " "
             if examples[sent1_cname][idx] is None:
                 examples[sent1_cname][idx] = " "
+            if examples[sent2_cname][idx] is None:
+                examples[sent2_cname][idx] = " "
 
-        sentences = examples[sent0_cname] + examples[sent1_cname]
-
-        if sent2_cname is not None:
-            for idx in range(total):
-                if examples[sent2_cname][idx] is None:
-                    examples[sent2_cname] = " "
-            sentences += examples[sent2_cname]
-
+        sentences = examples[sent0_cname] + examples[sent1_cname] + examples[sent2_cname] + examples[sent3_cname] + examples[sent4_cname] + examples[sent5_cname]
 
         sent_features = tokenizer(
             sentences,
@@ -475,13 +507,8 @@ def main():
         )
 
         features = {}
-        if sent2_cname is not None:
-            for key in sent_features:
-                features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)]
-        else:
-            for key in sent_features:
-                features[key] = [[sent_features[key][i], sent_features[key][i+total]] for i in range(total)]
-            
+        for key in sent_features:
+            features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2], sent_features[key][i+total*3], sent_features[key][i+total*4], sent_features[key][i+total*5]] for i in range(total)]
         return features
     
     if training_args.do_train:
@@ -573,8 +600,10 @@ def main():
 
     data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
 
-    training_args.trees = model_args.trees
-    training_args.teacher_name_or_path = model_args.teacher_name_or_path
+    training_args.first_teacher_name_or_path = model_args.first_teacher_name_or_path
+    training_args.second_teacher_name_or_path = model_args.second_teacher_name_or_path
+    training_args.tau2 = model_args.tau2
+    training_args.alpha_ = model_args.alpha_
 
     trainer = CLTrainer(
         model=model,

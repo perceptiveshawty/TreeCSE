@@ -109,7 +109,7 @@ TASK_LIST = TASK_LIST_CLASSIFICATION + TASK_LIST_CLUSTERING + TASK_LIST_PAIR_CLA
 
 
 class SimCSEWrapper:
-    def __init__(self, modelpath="princeton-nlp/sup-simcse-bert-base-uncased"):
+    def __init__(self, modelpath="runs/diffcse-listmle-bert"):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(modelpath)
         self.model = AutoModel.from_pretrained(modelpath).to(self.device)
@@ -144,7 +144,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--startid", type=int)
     parser.add_argument("--endid", type=int)
-    parser.add_argument("--modelpath", type=str, default="/gpfswork/rech/six/commun/models/princeton-nlp/sup-simcse-bert-base-uncased")
+    parser.add_argument("--modelpath", type=str, default="runs/diffcse-listmle-bert")
     parser.add_argument("--lang", type=str, default="en")
     parser.add_argument("--taskname", type=str, default=None)
     parser.add_argument("--batchsize", type=int, default=128)
