@@ -1,3 +1,4 @@
+/.mtebvenv
 /.venv
 /.venv3
 data/*
@@ -6,3 +7,16 @@ data/*
 /runs
 *.cpython*
 outputlogs.*
+/rankcse.*
+/structcse.*
+/experiments
+experiment0.*
+experiment1.*
+experiment2.*
+experiment3.*
+__pycache__
+final
+results
+scripts
+hyper_search.*
+*.slurm

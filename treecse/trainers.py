@@ -469,49 +469,65 @@ class CLTrainer(Trainer):
                 if (step + 1) % self.args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(self.args, self.state, self.control)
 
-
                 # TreeCSE: pass the embeddings obtained by the teacher to the student
-                with torch.no_grad():
+                if self.args.do_kd or self.args.do_rkd:
+                    with torch.no_grad():
 
-                    # Read batch inputs
-                    input_ids = inputs["input_ids"]
-                    attention_mask = inputs["attention_mask"]
+                        # Read batch inputs
+                        input_ids = inputs["input_ids"] 
+                        attention_mask = inputs["attention_mask"] 
 
-                    token_type_ids = None
-                    if "token_type_ids" in inputs:
-                        token_type_ids = inputs["token_type_ids"]
+                        token_type_ids = None
+                        if "token_type_ids" in inputs:
+                            token_type_ids = inputs["token_type_ids"]
 
-                    batch_size = input_ids.size(0)
-                    num_sent = input_ids.size(1)
+                        batch_size = input_ids.size(0)
+                        num_sent = input_ids.size(1)
 
-                    # Flatten input for encoding by the teacher - (bsz * num_sent, len)
-                    input_ids = input_ids.view((-1, input_ids.size(-1))) 
-                    token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1))) 
-                    attention_mask = attention_mask.view((-1, attention_mask.size(-1)))
+                        # Flatten input for encoding by the teacher - (bsz * num_sent, len)
+                        input_ids = input_ids.view((-1, input_ids.size(-1))) 
+                        token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1))) 
+                        attention_mask = attention_mask.view((-1, attention_mask.size(-1)))
 
-                    teacher_inputs = copy.deepcopy(inputs)
-                    teacher_inputs["input_ids"] = input_ids
-                    teacher_inputs["attention_mask"] = attention_mask
-                    teacher_inputs["token_type_ids"] = token_type_ids
+                        teacher_inputs = copy.deepcopy(inputs)
+                        teacher_inputs["input_ids"] = input_ids
+                        teacher_inputs["attention_mask"] = attention_mask
+                        teacher_inputs["token_type_ids"] = token_type_ids
 
-                    # Encode, unflatten, and pass to student
-                    if teacher is not None:
-                        # Single teacher
-                        embeddings = teacher.encode(teacher_inputs)
-                        embeddings = embeddings.view((batch_size, num_sent, -1))
-                        if self.args.fp16:
-                            embeddings = embeddings.to(torch.float16)
-                        zPT, zLT, zRT, zPT_, zLT_, zRT_ = torch.split(embeddings, split_size_or_sections=1, dim=1)
-                    else:
-                        # Weighted average of two teachers
-                        raise NotImplementedError
-
-                    inputs["zPT"] = zPT.squeeze()
-                    inputs["zLT"] = zLT.squeeze()
-                    inputs["zRT"] = zRT.squeeze()
-                    inputs["zPT_"] = zPT_.squeeze()
-                    inputs["zLT_"] = zLT_.squeeze()
-                    inputs["zRT_"] = zRT_.squeeze()
+                        # Encode, unflatten, and pass to student
+                        if teacher is not None:
+                            # Single teacher
+                            embeddings = teacher.encode(teacher_inputs).view((batch_size, num_sent, -1)).to(self.args.device)
+                            if self.args.fp16:
+                                embeddings = embeddings.to(torch.float16)
+                            zPT, zLT, zRT = torch.split(embeddings, split_size_or_sections=1, dim=1) # (bs, 1, hidden) x 3
+                            zPT, zLT, zRT = zPT.squeeze(), zLT.squeeze(), zRT.squeeze() # (bs, hidden) x 3
+                            # Tree-based ensembling
+                            zLRT = 0.5 * (zLT + zRT)
+                            # Teacher similarity preds
+                            cos = nn.CosineSimilarity(dim=-1)
+                            zP_zLR_sim_T = cos(zPT.unsqueeze(1), zLRT.unsqueeze(0)) / self.args.tau2
+                        else:
+                            # Weighted average of two teachers
+                            e1 = first_teacher.encode(teacher_inputs).view((batch_size, num_sent, -1)).to(self.args.device)
+                            e2 = second_teacher.encode(teacher_inputs).view((batch_size, num_sent, -1)).to(self.args.device)
+                            if self.args.fp16:
+                                e1 = e1.to(torch.float16)
+                                e2 = e2.to(torch.float16)
+                            zPT1, zLT1, zRT1 = torch.split(e1, split_size_or_sections=1, dim=1) # (bs, 1, hidden) x 3
+                            zPT2, zLT2, zRT2 = torch.split(e2, split_size_or_sections=1, dim=1) # (bs, 1, hidden) x 3
+                            zPT1, zLT1, zRT1 = zPT1.squeeze(), zLT1.squeeze(), zRT1.squeeze() # (bs, hidden) x 3
+                            zPT2, zLT2, zRT2 = zPT2.squeeze(), zLT2.squeeze(), zRT2.squeeze() # (bs, hidden) x 3
+                            # Tree-based ensembling
+                            zLRT1, zLRT2 = 0.5 * (zLT1 + zRT1), 0.5 * (zLT2 + zRT2)
+                            # Teacher similarity preds
+                            cos = nn.CosineSimilarity(dim=-1)
+                            zP_zLR_sim_T1 = cos(zPT1.unsqueeze(1), zLRT1.unsqueeze(0)) / self.args.tau2
+                            zP_zLR_sim_T2 = cos(zPT2.unsqueeze(1), zLRT2.unsqueeze(0)) / self.args.tau2
+                            # Weighted average of two teachers' similarity preds
+                            zP_zLR_sim_T = (self.args.alpha_ * zP_zLR_sim_T1) + ((1.0 - self.args.alpha_) * zP_zLR_sim_T2)
+                        # Pass to trainer through kwargs
+                        inputs["zP_zLR_sim_T"] = zP_zLR_sim_T
 
                 if ((step + 1) % self.args.gradient_accumulation_steps != 0) and self.args.local_rank != -1:
                     # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.

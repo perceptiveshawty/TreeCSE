@@ -6,7 +6,7 @@ from RST import RST
 
 def parse_args():
     parser = argparse.ArgumentParser(description='RST Dataset Curation')
-    parser.add_argument('--strategy', type=str, default='deep', choices=['full', 'deep', 'shallow', 'simcse'],
+    parser.add_argument('--strategy', type=str, default='simcse', choices=['full', 'deep', 'shallow', 'simcse'],
                         help='whether to sample from the whole (full) RST, or bottom/top (deep/shallow) of the RST')
     parser.add_argument('--data_dir', type=str, default='./data/wikitext103',
                         help='path to data dir; expects output of DMRST_Parser + original text file (4 total files)')
@@ -85,6 +85,10 @@ def make_rst_dataset(output_dir, strategy):
             parsetree = rst_rels[index].strip()[2:-2].split()
             rst_example = RST.from_data(tokenization, segmentation, parsetree)
         except:
+            tokens = ex.split()
+            word_count = len(tokens)
+            parent, left, right = ex, " ".join(tokens[:word_count]).strip(), " ".join(tokens[word_count:]).strip()
+            examples.append({'parent' : parent, 'left' : left, 'right' : right})
             continue
 
         if strategy != 'simcse':
@@ -104,11 +108,12 @@ def make_rst_dataset(output_dir, strategy):
             left_arg_edus, right_arg_edus, all_schemes = RST.all_rst_cutouts(rst_example)
 
             for lae, rae in zip(left_arg_edus, right_arg_edus):
-                left, right = [e.text for e in lae], [e.text for e in rae]
-                parent = " ".join(left + right)
+                all_edus = [e.text for e in lae] + [e.text for e in rae]
+                parent = " ".join(all_edus)
+                left, right = merge_edus(all_edus, k=2)
                 examples.append({'parent' : parent, 'left' : " ".join(left), 'right' : " ".join(right)})
 
-    with open(os.path.join(output_dir, 'rst_data_for_csev2.json'), 'w') as jout:
+    with open(os.path.join(output_dir, 'rst_data_for_cse_v3.json'), 'w') as jout:
         ndjson.dump(examples, jout)
 
 if __name__ == '__main__':

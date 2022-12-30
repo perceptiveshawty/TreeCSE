@@ -14,7 +14,7 @@ class Teacher(SimCSE):
                 device: str = None,
                 num_cells: int = 100,
                 num_cells_in_search: int = 10,
-                pooler = "cls"):
+                pooler = "cls_before_pooler"):
         
         super().__init__(model_name_or_path, device, num_cells, num_cells_in_search, pooler)
         self.model = self.model.to(self.device if device is None else device)

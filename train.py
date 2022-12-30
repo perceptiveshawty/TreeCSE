@@ -107,52 +107,34 @@ class ModelArguments:
     tau2: float = field(
         default=0.05,
         metadata={
-            "help": "Temperature for softmax used in ranking distillation (same as tau_2 in paper). When training with the ListMLE loss, tau3 is set to 0.5 * tau2, following the observations stated in Section 5.3. "
+            "help": "Temperature for softmax used by the teachers (same as tau_2 in paper). When training with the ListNet loss, tau3 is set to 0.5 * tau2, following the observations in Section 5.3. "
         },
     )
     alpha_: float = field(
         default=float(1/3),
         metadata={
-            "help": "Coefficient to compute a weighted average of similarity scores obtained from the teachers."
+            "help": "Coefficient for computing a weighted average of similarity scores obtained from the teachers."
         }
     )
     beta_: float = field(
         default=1.0,
         metadata={
-            "help": "Coefficient used to weight ranking consistency loss"
+            "help": "Coefficient used to balance ranking consistency loss"
         }
     )
     gamma_: float = field(
         default=1.0,
         metadata={
-            "help": "Coefficient used to weight ranking distillation loss"
-        }
-    )
-    delta_: float = field(
-        default=1.345,
-        metadata={
-            "help": "-"
-        }
-    )
-    blur: float = field(
-        default=0.75,
-        metadata={
-            "help": "Interpolation coefficient for sinkhorn divergence <--> W2 Distance"
+            "help": "Coefficient used to balance ranking distillation loss"
         }
     )
     do_nce: bool = field(
         default=False,
         metadata={
-            "help": "Whether or not to incorporate L_distillation"
+            "help": "Whether or not to incorporate L_infoNCE"
         },
     )
     do_kd: bool = field(
-        default=False,
-        metadata={
-            "help": "Whether or not to incorporate L_distillation"
-        },
-    )
-    do_rkd: bool = field(
         default=False,
         metadata={
             "help": "Whether or not to incorporate L_distillation"
@@ -162,18 +144,6 @@ class ModelArguments:
         default=False,
         metadata={
             "help": "Whether or not to incorporate L_consistency"
-        },
-    )
-    nce_parent_only: bool = field(
-        default=False,
-        metadata={
-            "help": "na"
-        },
-    )
-    cross_distill: bool = field(
-        default=False,
-        metadata={
-            "help": "na"
         },
     )
 
@@ -475,7 +445,6 @@ def main():
     if len(column_names) == 3: 
         # Parent, Left, Right
         sent0_cname, sent1_cname, sent2_cname = column_names
-        sent3_cname, sent4_cname, sent5_cname = column_names
     else:
         raise NotImplementedError
 
@@ -497,7 +466,7 @@ def main():
             if examples[sent2_cname][idx] is None:
                 examples[sent2_cname][idx] = " "
 
-        sentences = examples[sent0_cname] + examples[sent1_cname] + examples[sent2_cname] + examples[sent3_cname] + examples[sent4_cname] + examples[sent5_cname]
+        sentences = examples[sent0_cname] + examples[sent1_cname] + examples[sent2_cname] 
 
         sent_features = tokenizer(
             sentences,
@@ -508,7 +477,7 @@ def main():
 
         features = {}
         for key in sent_features:
-            features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2], sent_features[key][i+total*3], sent_features[key][i+total*4], sent_features[key][i+total*5]] for i in range(total)]
+            features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)] 
         return features
     
     if training_args.do_train:
@@ -604,6 +573,7 @@ def main():
     training_args.second_teacher_name_or_path = model_args.second_teacher_name_or_path
     training_args.tau2 = model_args.tau2
     training_args.alpha_ = model_args.alpha_
+    training_args.do_kd = model_args.do_kd
 
     trainer = CLTrainer(
         model=model,

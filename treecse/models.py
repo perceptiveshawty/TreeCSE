@@ -115,7 +115,6 @@ class StructureLoss(nn.Module):
 
     def __init__(self, delta_, blur):
         super(StructureLoss, self).__init__()
-        self.otp_loss_fct = SamplesLoss(loss="sinkhorn", p=2, blur=blur)
         self.delta_ = delta_
 
     def forward(self, zS, zT):
@@ -128,7 +127,7 @@ class StructureLoss(nn.Module):
         norm_zSd = F.normalize(zSd, p=2, dim=2)
         angle_S = torch.bmm(norm_zSd, norm_zSd.transpose(1, 2)).view(-1)
 
-        return self.delta_ * self.otp_loss_fct(angle_S, angle_T)
+        return self.delta_ * F.smooth_l1_loss(angle_S, angle_T, reduction='mean')
         # return F.smooth_l1_loss(angle_S, angle_T, reduction='sum')
 
 class Pooler(nn.Module):
@@ -201,12 +200,7 @@ def cl_forward(cls,
     return_dict=None,
     mlm_input_ids=None,
     mlm_labels=None,
-    zPT=None,
-    zLT=None,
-    zRT=None,
-    zPT_=None,
-    zLT_=None,
-    zRT_=None,
+    zP_zLR_sim_T=None,
 ):
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
     ori_input_ids = input_ids
@@ -253,150 +247,55 @@ def cl_forward(cls,
     pooler_output = cls.pooler(attention_mask, outputs)
     pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
 
-    # Tree-based positive ensembling
-    # if cls.model_args.trees:
-    #     anchor_output, ensemble_output = torch.split(pooler_output, split_size_or_sections=[1, num_sent - 1], dim=1)  # (bs, 1, hidden) and (bs, num_sent - 1, hidden)
-    #     left_output, right_output = torch.split(torch.clone(ensemble_output), split_size_or_sections=[1 for _ in range(num_sent - 1)], dim=1) # (bs, num_sent - 1, hidden) -> (bs, 1, hidden) and (bs, 1, hidden)
-    #     ensemble_output = ensemble_output.sum(dim=1, keepdim=True) # (bs, num_sent - 1, hidden) -> (bs, 1, hidden)
-    #     pooler_output = torch.cat((anchor_output, ensemble_output, left_output, right_output), dim=1) # (bs, 4, hidden)
-    # if cls.model_args.trees:
-    #     parent_output, left_output, right_output = torch.split(pooler_output, split_size_or_sections=1, dim=1)
+    # Tree-based ensembling
+    xP, xL, xR = torch.split(pooler_output, split_size_or_sections=1, dim=1) # (bs, 1, hidden) x 3
+    xLR = 0.5 * (xL + xR) # ensemble left and right constituents to create positive example for xi
+    pooler_output = torch.cat([xP, xLR], dim=1) # (bs, 2, hidden)
 
     # If using "cls", we add an extra MLP layer
     # (same as BERT's original implementation) over the representation.
     if cls.pooler_type == "cls":
-        pooler_output = cls.mlp(pooler_output)
+        pooler_output = cls.mlp(pooler_output) # (bs, 2, hidden)
 
     # Separate representation
-    zP, zL, zR, zP_, zL_, zR_ = torch.split(pooler_output, split_size_or_sections=1, dim=1)
-    zP = torch.squeeze(zP)
-    zL = torch.squeeze(zL)
-    zR = torch.squeeze(zR)
-    zP_ = torch.squeeze(zP_)
-    zL_ = torch.squeeze(zL_)
-    zR_ = torch.squeeze(zR_)
+    zP, zLR = torch.split(pooler_output, split_size_or_sections=1, dim=1) # (bs, 1, hidden) x 2
+    zP, zLR = zP.squeeze(), zLR.squeeze() # (bs, hidden) x 2
 
     # Gather all embeddings if using distributed training
     if dist.is_initialized() and cls.training:
 
         # Dummy vectors for allgather
         zP_list = [torch.zeros_like(zP) for _ in range(dist.get_world_size())]
-        zL_list = [torch.zeros_like(zL) for _ in range(dist.get_world_size())]
-        zR_list = [torch.zeros_like(zR) for _ in range(dist.get_world_size())]
-        zP__list = [torch.zeros_like(zP_) for _ in range(dist.get_world_size())]
-        zL__list = [torch.zeros_like(zL_) for _ in range(dist.get_world_size())]
-        zR__list = [torch.zeros_like(zR_) for _ in range(dist.get_world_size())]
+        zLR_list = [torch.zeros_like(zLR) for _ in range(dist.get_world_size())]
         # Allgather
         dist.all_gather(tensor_list=zP_list, tensor=zP.contiguous())
-        dist.all_gather(tensor_list=zL_list, tensor=zL.contiguous())
-        dist.all_gather(tensor_list=zR_list, tensor=zR.contiguous())
-        dist.all_gather(tensor_list=zP__list, tensor=zP_.contiguous())
-        dist.all_gather(tensor_list=zL__list, tensor=zL_.contiguous())
-        dist.all_gather(tensor_list=zR__list, tensor=zR_.contiguous())
+        dist.all_gather(tensor_list=zLR_list, tensor=zLR.contiguous())
         # Since allgather results do not have gradients, we replace the
         # current process's corresponding embeddings with original tensors
         zP_list[dist.get_rank()] = zP
-        zL_list[dist.get_rank()] = zL
-        zR_list[dist.get_rank()] = zR
-        zP__list[dist.get_rank()] = zP_
-        zL__list[dist.get_rank()] = zL_
-        zR__list[dist.get_rank()] = zR_
+        zLR_list[dist.get_rank()] = zLR
         # Get full batch embeddings: (bs x N, hidden)
         zP = torch.cat(zP_list, 0)
-        zL = torch.cat(zL_list, 0)
-        zR = torch.cat(zR_list, 0)
-        zP_ = torch.cat(zP__list, 0)
-        zL_ = torch.cat(zL__list, 0)
-        zR_ = torch.cat(zR__list, 0)
+        zLR = torch.cat(zLR_list, 0)
 
     loss = 0
+    zP_zLR_sim_S = cls.sim(zP.unsqueeze(1), zLR.unsqueeze(0))
+    zLR_zP_sim_S = cls.sim(zLR.unsqueeze(1), zP.unsqueeze(0))
 
     # L_infoNCE
     if cls.model_args.do_nce:
+        labels = torch.arange(zP_zLR_sim_S.size(0)).long().to(cls.device)
+        nce_loss_fct = nn.CrossEntropyLoss()
+        loss = loss + nce_loss_fct(zP_zLR_sim_S, labels) 
 
-        if cls.model_args.nce_parent_only:
-            zP_sim = cls.sim(zP.unsqueeze(1), zP_.unsqueeze(0))
-
-            labels = torch.arange(zP_sim.size(0)).long().to(cls.device)
-            nce_loss_fct = nn.CrossEntropyLoss()
-            loss = loss + nce_loss_fct(zP_sim, labels)
-
-        else:
-            zP_sim = cls.sim(zP.unsqueeze(1), zP_.unsqueeze(0))
-            zL_sim = cls.sim(zL.unsqueeze(1), zL_.unsqueeze(0))
-            zR_sim = cls.sim(zR.unsqueeze(1), zR_.unsqueeze(0))
-
-            labels = torch.arange(zP_sim.size(0)).long().to(cls.device)
-            nce_loss_fct = nn.CrossEntropyLoss()
-
-            loss = loss + nce_loss_fct(zP_sim, labels)
-            loss = loss + nce_loss_fct(zL_sim, labels)
-            loss = loss + nce_loss_fct(zR_sim, labels)
-
-    # L_rank
+    # L_distillation
     if cls.model_args.do_kd:
-
-        if cls.model_args.cross_distill:
-
-            zP_zL_sim_S = cls.sim(zP.unsqueeze(1), zL.unsqueeze(0))
-            zP_zR_sim_S = cls.sim(zP.unsqueeze(1), zR.unsqueeze(0))
-            with torch.no_grad():
-                zP_zL_sim_T = cls.sim(zPT.unsqueeze(1), zLT.unsqueeze(0))
-                zP_zR_sim_T = cls.sim(zPT.unsqueeze(1), zRT.unsqueeze(0))
-
-            kd_loss_fct = (ListMLE(cls.model_args.tau2, cls.model_args.gamma_) if cls.model_args.distillation_loss == "listmle" else ListNet(cls.model_args.tau2, cls.model_args.gamma_))
-
-            loss = loss + kd_loss_fct(zP_zL_sim_S, zP_zL_sim_T)
-            loss = loss + kd_loss_fct(zP_zR_sim_S, zP_zR_sim_T)
-
-        else:
-            
-            with torch.no_grad():
-                zP_sim_T = cls.sim(zPT.unsqueeze(1), zPT_.unsqueeze(0))
-                zL_sim_T = cls.sim(zLT.unsqueeze(1), zLT_.unsqueeze(0))
-                zR_sim_T = cls.sim(zRT.unsqueeze(1), zRT_.unsqueeze(0))
-
-            kd_loss_fct = (ListMLE(cls.model_args.tau2, cls.model_args.gamma_) if cls.model_args.distillation_loss == "listmle" else ListNet(cls.model_args.tau2, cls.model_args.gamma_))
-
-            loss = loss + kd_loss_fct(zP_sim, zP_sim_T)
-            loss = loss + kd_loss_fct(zL_sim, zL_sim_T)
-            loss = loss + kd_loss_fct(zR_sim, zR_sim_T)
-
-    # L_relation
-    if cls.model_args.do_rkd:
-
-        if cls.model_args.cross_distill:
-
-            zL_minus_zP_S = zL - zP
-            zR_minus_zP_S = zR - zP
-            zL_minus_zP_T = zLT - zPT
-            zR_minus_zP_T = zRT - zPT
-
-            angle_S = torch.bmm(zL_minus_zP_S.unsqueeze(0), zR_minus_zP_S.unsqueeze(0).transpose(1, 2)) 
-            angle_S = angle_S / (torch.linalg.norm(zL_minus_zP_S) * torch.linalg.norm(zR_minus_zP_S))
-            angle_T = torch.bmm(zL_minus_zP_T.unsqueeze(0), zR_minus_zP_T.unsqueeze(0).transpose(1, 2)) 
-            angle_T = angle_T / (torch.linalg.norm(zL_minus_zP_T) * torch.linalg.norm(zR_minus_zP_T))
-
-            rkd_loss_fct = nn.SmoothL1Loss(beta=cls.model_args.delta_)
-
-            loss = loss + rkd_loss_fct(angle_S, angle_T)
-
-        else:
-
-            rkd_loss_fct = StructureLoss(cls.model_args.delta_, cls.model_args.blur)
-            loss = loss + rkd_loss_fct(zP, zPT)
-            loss = loss + rkd_loss_fct(zL, zLT)
-            loss = loss + rkd_loss_fct(zR, zRT)
+        kd_loss_fct = (ListMLE(cls.model_args.tau2, cls.model_args.gamma_) if cls.model_args.distillation_loss == "listmle" else ListNet(cls.model_args.tau2, cls.model_args.gamma_))
+        loss = loss + kd_loss_fct(zP_zLR_sim_S, zP_zLR_sim_T) # zP_zLR_sim_T is the similarity matrix computed by the teacher(s)
 
     # L_consistency
     if cls.model_args.do_sd:
-        zP__sim = cls.sim(zP_.unsqueeze(1), zP.unsqueeze(0))
-        zL__sim = cls.sim(zL_.unsqueeze(1), zL.unsqueeze(0))
-        zR__sim = cls.sim(zR_.unsqueeze(1), zR.unsqueeze(0))
-        
-        loss = loss + cls.div(zP_sim.softmax(dim=-1).clamp(min=1e-9), zP__sim.softmax(dim=-1).clamp(min=1e-9))
-        loss = loss + cls.div(zL_sim.softmax(dim=-1).clamp(min=1e-9), zL__sim.softmax(dim=-1).clamp(min=1e-9))
-        loss = loss + cls.div(zR_sim.softmax(dim=-1).clamp(min=1e-9), zR__sim.softmax(dim=-1).clamp(min=1e-9))
+        loss = loss + cls.div(zP_zLR_sim_S.softmax(dim=-1).clamp(min=1e-7), zLR_zP_sim_S.softmax(dim=-1).clamp(min=1e-7)) 
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:
@@ -406,11 +305,11 @@ def cl_forward(cls,
         loss = loss + cls.model_args.mlm_weight * masked_lm_loss
 
     if not return_dict:
-        output = (cos_sim,) + outputs[2:]
+        output = (zP_zLR_sim_S,) + outputs[2:]
         return ((loss,) + output) if loss is not None else output
     return SequenceClassifierOutput(
         loss=loss,
-        logits=zP_sim,
+        logits=zP_zLR_sim_S,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
     )
@@ -484,12 +383,7 @@ class BertForCL(BertPreTrainedModel):
         sent_emb=False,
         mlm_input_ids=None,
         mlm_labels=None,
-        zPT=None,
-        zLT=None,
-        zRT=None,
-        zPT_=None,
-        zLT_=None,
-        zRT_=None,
+        zP_zLR_sim_T=None,
     ):
         if sent_emb:
             return sentemb_forward(self, self.bert,
@@ -518,12 +412,7 @@ class BertForCL(BertPreTrainedModel):
                 return_dict=return_dict,
                 mlm_input_ids=mlm_input_ids,
                 mlm_labels=mlm_labels,
-                zPT=zPT,
-                zLT=zLT,
-                zRT=zRT,
-                zPT_=zPT_,
-                zLT_=zLT_,
-                zRT_=zRT_,
+                zP_zLR_sim_T=zP_zLR_sim_T,
             )
 
 class RobertaForCL(RobertaPreTrainedModel):
@@ -553,12 +442,7 @@ class RobertaForCL(RobertaPreTrainedModel):
         sent_emb=False,
         mlm_input_ids=None,
         mlm_labels=None,
-        zPT=None,
-        zLT=None,
-        zRT=None,
-        zPT_=None,
-        zLT_=None,
-        zRT_=None,
+        zP_zLR_sim_T=None,
     ):
         if sent_emb:
             return sentemb_forward(self, self.roberta,
@@ -587,10 +471,5 @@ class RobertaForCL(RobertaPreTrainedModel):
                 return_dict=return_dict,
                 mlm_input_ids=mlm_input_ids,
                 mlm_labels=mlm_labels,
-                zPT=zPT,
-                zLT=zLT,
-                zRT=zRT,
-                zPT_=zPT_,
-                zLT_=zLT_,
-                zRT_=zRT_,
+                zP_zLR_sim_T=zP_zLR_sim_T,
             )
