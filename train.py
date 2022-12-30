@@ -128,6 +128,12 @@ class ModelArguments:
             "help": "Coefficient used to balance ranking distillation loss"
         }
     )
+    delta_: float = field(
+        default=1e-3,
+        metadata={
+            "help": "Coefficient used to balance RS relation classification loss"
+        }
+    )
     do_nce: bool = field(
         default=False,
         metadata={

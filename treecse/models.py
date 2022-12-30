@@ -37,7 +37,7 @@ class CLFLayer(nn.Module):
 
     def __init__(self, config, num_classes=17):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, num_classes)
+        self.dense = nn.Linear(2 * config.hidden_size, num_classes)
 
     def forward(self, features, **kwargs):
         return self.dense(features)
@@ -274,13 +274,13 @@ def cl_forward(cls,
 
     # L_clf
     if cls.model_args.do_clf:
-        clf_output = cls.clf(zP)
-        class_weights = [0.17803043405502886, 0.7733415906921968, 0.8406959316429488, 0.6237546010260442, 1.0935038013643568, 1.1456473054819842, 0.36822158477315287, 1.0852405484573213, 7.076344245847423, 5.470990447461036, 4.823706724588856, 30.112507906388362, 0.8690849305565855, 22.74487906837862, 8.88507074453815, 1357.8003565062388, 7467.901960784314]
-        class_weights = torch.tensor(class_weights, dtype=zP.dtype, device=cls.device)
+        clf_output = cls.clf(torch.cat([xL.clone().squeeze(), xR.clone().squeeze()], dim=-1))
+        class_weights = [0, 0.7733415906921968, 0.8406959316429488, 0, 1.0935038013643568, 1.1456473054819842, 0.36822158477315287, 1.0852405484573213, 7.076344245847423, 5.470990447461036, 4.823706724588856, 30.112507906388362, 0.8690849305565855, 22.74487906837862, 8.88507074453815, 1357.8003565062388, 7467.901960784314]
+        class_weights = torch.tensor(class_weights, dtype=xP.dtype, device=cls.device)
 
         scl_loss_fct = nn.CrossEntropyLoss(weight=class_weights)
         labels = labels.squeeze().long().to(cls.device)
-        loss = loss + (0.001 * scl_loss_fct(clf_output, labels))
+        loss = loss + (cls.model_args.delta_ * scl_loss_fct(clf_output, labels))
 
     # L_distillation
     if cls.model_args.do_kd:
