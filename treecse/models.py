@@ -33,6 +33,15 @@ class MLPLayer(nn.Module):
 
         return x
 
+class CLFLayer(nn.Module):
+
+    def __init__(self, config, num_classes=17):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, num_classes)
+
+    def forward(self, features, **kwargs):
+        return self.dense(features)
+
 class Similarity(nn.Module):
     """
     Dot product or cosine similarity
@@ -111,25 +120,6 @@ class ListMLE(nn.Module):
 
         return self.gamma_ * torch.mean(torch.sum(observation_loss, dim=1))
 
-class StructureLoss(nn.Module):
-
-    def __init__(self, delta_, blur):
-        super(StructureLoss, self).__init__()
-        self.delta_ = delta_
-
-    def forward(self, zS, zT):
-        with torch.no_grad():
-            zTd = (zT.unsqueeze(0) - zT.unsqueeze(1))
-            norm_zTd = F.normalize(zTd, p=2, dim=2)
-            angle_T = torch.bmm(norm_zTd, norm_zTd.transpose(1, 2)).view(-1)
-
-        zSd = (zS.unsqueeze(0) - zS.unsqueeze(1))
-        norm_zSd = F.normalize(zSd, p=2, dim=2)
-        angle_S = torch.bmm(norm_zSd, norm_zSd.transpose(1, 2)).view(-1)
-
-        return self.delta_ * F.smooth_l1_loss(angle_S, angle_T, reduction='mean')
-        # return F.smooth_l1_loss(angle_S, angle_T, reduction='sum')
-
 class Pooler(nn.Module):
     """
     Parameter-free poolers to get the sentence embedding
@@ -173,17 +163,11 @@ def cl_init(cls, config):
     cls.pooler_type = cls.model_args.pooler_type
     cls.pooler = Pooler(cls.model_args.pooler_type)
     if cls.model_args.pooler_type == "cls":
-        cls.mlp = MLPLayer(config)
+        cls.mlp = MLPLayer(config) 
+    if cls.model_args.do_clf:
+        cls.clf = CLFLayer(config, 17) # cls.model_args.num_classes
     cls.sim = Similarity(temp=cls.model_args.temp)
     cls.div = Divergence(beta_=cls.model_args.beta_)
-    # if cls.model_args.distillation_loss == "listnet":
-    #     cls.distillation_loss_fct = ListNet(cls.model_args.tau2, cls.model_args.gamma_)
-    # elif cls.model_args.distillation_loss == "listmle":
-    #     cls.distillation_loss_fct = ListMLE(cls.model_args.tau2, cls.model_args.gamma_)
-    # elif cls.model_args.distillation_loss == "sinkhorn":
-    #     cls.distillation_loss_fct = SamplesLoss(loss="sinkhorn", p=2, blur=cls.model_args.blur)
-    # else:
-    #     cls.distillation_loss_fct = RankingLoss(cls.model_args.tau2, cls.model_args.gamma_, cls.model_args.delta_, cls.model_args.blur)
     cls.init_weights()
 
 def cl_forward(cls,
@@ -284,18 +268,28 @@ def cl_forward(cls,
 
     # L_infoNCE
     if cls.model_args.do_nce:
-        labels = torch.arange(zP_zLR_sim_S.size(0)).long().to(cls.device)
+        nce_labels = torch.arange(zP_zLR_sim_S.size(0)).long().to(cls.device)
         nce_loss_fct = nn.CrossEntropyLoss()
-        loss = loss + nce_loss_fct(zP_zLR_sim_S, labels) 
+        loss = loss + nce_loss_fct(zP_zLR_sim_S, nce_labels) 
+
+    # L_clf
+    if cls.model_args.do_clf:
+        clf_output = cls.clf(zP)
+        class_weights = [0.17803043405502886, 0.7733415906921968, 0.8406959316429488, 0.6237546010260442, 1.0935038013643568, 1.1456473054819842, 0.36822158477315287, 1.0852405484573213, 7.076344245847423, 5.470990447461036, 4.823706724588856, 30.112507906388362, 0.8690849305565855, 22.74487906837862, 8.88507074453815, 1357.8003565062388, 7467.901960784314]
+        class_weights = torch.tensor(class_weights, dtype=zP.dtype, device=cls.device)
+
+        scl_loss_fct = nn.CrossEntropyLoss(weight=class_weights)
+        labels = labels.squeeze().long().to(cls.device)
+        loss = loss + (0.001 * scl_loss_fct(clf_output, labels))
 
     # L_distillation
     if cls.model_args.do_kd:
         kd_loss_fct = (ListMLE(cls.model_args.tau2, cls.model_args.gamma_) if cls.model_args.distillation_loss == "listmle" else ListNet(cls.model_args.tau2, cls.model_args.gamma_))
-        loss = loss + kd_loss_fct(zP_zLR_sim_S, zP_zLR_sim_T) # zP_zLR_sim_T is the similarity matrix computed by the teacher(s)
+        loss = loss + kd_loss_fct(zP_zLR_sim_S.clone(), zP_zLR_sim_T.clone()) # zP_zLR_sim_T is the similarity matrix computed by the teacher(s)
 
     # L_consistency
     if cls.model_args.do_sd:
-        loss = loss + cls.div(zP_zLR_sim_S.softmax(dim=-1).clamp(min=1e-7), zLR_zP_sim_S.softmax(dim=-1).clamp(min=1e-7)) 
+        loss = loss + cls.div(zP_zLR_sim_S.clone().softmax(dim=-1).clamp(min=1e-7), zLR_zP_sim_S.clone().softmax(dim=-1).clamp(min=1e-7)) 
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:

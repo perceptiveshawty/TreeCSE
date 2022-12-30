@@ -87,7 +87,7 @@ class ModelArguments:
 
     # TreeCSE's arguments
     first_teacher_name_or_path: str = field(
-        default="voidism/diffcse-bert-base-uncased-sts",
+        default=None,
         metadata={
             "help": "The model checkpoint for weights of the first teacher model. The embeddings of this model are weighted by alpha. This can be any transformers-based model; preferably one trained to yield sentence embeddings."
         },
@@ -132,6 +132,12 @@ class ModelArguments:
         default=False,
         metadata={
             "help": "Whether or not to incorporate L_infoNCE"
+        },
+    )
+    do_clf: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether or not to incorporate L_clf"
         },
     )
     do_kd: bool = field(
@@ -445,6 +451,10 @@ def main():
     if len(column_names) == 3: 
         # Parent, Left, Right
         sent0_cname, sent1_cname, sent2_cname = column_names
+    elif len(column_names) == 4:
+        # Parent, Left, Right, Tree Class
+        sent0_cname, sent1_cname, sent2_cname, target = column_names
+        column_names = column_names[:3]
     else:
         raise NotImplementedError
 
@@ -488,6 +498,7 @@ def main():
             remove_columns=column_names,
             load_from_cache_file=not data_args.overwrite_cache,
         )
+        train_dataset = train_dataset.shuffle(seed=1993)
 
     # Data collator
     @dataclass

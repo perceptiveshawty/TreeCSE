@@ -178,8 +178,8 @@ class CLTrainer(Trainer):
                     self.deepspeed.save_checkpoint(output_dir)
 
                 # Save optimizer and scheduler
-                # if self.sharded_dpp:
-                #     self.optimizer.consolidate_state_dict()
+                if self.sharded_dpp:
+                    self.optimizer.consolidate_state_dict()
 
                 if is_torch_tpu_available():
                     xm.rendezvous("saving_optimizer_states")
@@ -405,14 +405,15 @@ class CLTrainer(Trainer):
 
         # TreeCSE - Initialize the teacher
         teacher = None
-        if self.args.second_teacher_name_or_path is None:
+        if self.args.first_teacher_name_or_path is not None and self.args.second_teacher_name_or_path is None:
             teacher_pooler = ("cls_before_pooler" if ("simcse" in self.args.first_teacher_name_or_path or "diffcse" in self.args.first_teacher_name_or_path) else "avg")
             teacher = Teacher(model_name_or_path=self.args.first_teacher_name_or_path, pooler=teacher_pooler)
-        else:
+        elif self.args.first_teacher_name_or_path is not None and self.args.second_teacher_name_or_path is not None:
             first_pooler = ("cls_before_pooler" if ("simcse" in self.args.first_teacher_name_or_path or "diffcse" in self.args.first_teacher_name_or_path) else "avg")
             first_teacher = Teacher(model_name_or_path=self.args.first_teacher_name_or_path, pooler=first_pooler)
             second_pooler = ("cls_before_pooler" if ("simcse" in self.args.second_teacher_name_or_path or "diffcse" in self.args.second_teacher_name_or_path) else "avg")
             second_teacher = Teacher(model_name_or_path=self.args.second_teacher_name_or_path, pooler=second_pooler)
+
 
         # Update the references
         self.callback_handler.model = self.model
@@ -470,7 +471,7 @@ class CLTrainer(Trainer):
                     self.control = self.callback_handler.on_step_begin(self.args, self.state, self.control)
 
                 # TreeCSE: pass the embeddings obtained by the teacher to the student
-                if self.args.do_kd or self.args.do_rkd:
+                if self.args.do_kd:
                     with torch.no_grad():
 
                         # Read batch inputs
