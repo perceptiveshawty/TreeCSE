@@ -128,6 +128,12 @@ class ModelArguments:
             "help": "Coefficient used to balance ranking distillation loss"
         }
     )
+    delta_: float = field(
+        default=0.001,
+        metadata={
+            "help": "Coefficient used to balance relation prediction loss"
+        }
+    )
     do_nce: bool = field(
         default=False,
         metadata={
@@ -144,6 +150,18 @@ class ModelArguments:
         default=False,
         metadata={
             "help": "Whether or not to incorporate L_consistency"
+        },
+    )
+    do_clf: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether or not to incorporate L_clf"
+        },
+    )
+    two_poolers: bool = field(
+        default=False,
+        metadata={
+            "help": "na"
         },
     )
 
@@ -442,9 +460,18 @@ def main():
 
     # Prepare features
     column_names = datasets['train'].column_names
-    if len(column_names) == 3: 
+    sent2_cname = None
+    if len(column_names) == 1:
+        # EDU
+        sent0_cname = column_names[0]
+        sent1_cname = column_names[0]
+    elif len(column_names) == 3: 
         # Parent, Left, Right
         sent0_cname, sent1_cname, sent2_cname = column_names
+    elif len(column_names) == 4:
+        # Parent, Left, Right, Tree Class
+        sent0_cname, sent1_cname, sent2_cname, target = column_names
+        column_names = column_names[:3]
     else:
         raise NotImplementedError
 
@@ -463,10 +490,15 @@ def main():
                 examples[sent0_cname][idx] = " "
             if examples[sent1_cname][idx] is None:
                 examples[sent1_cname][idx] = " "
-            if examples[sent2_cname][idx] is None:
-                examples[sent2_cname][idx] = " "
 
-        sentences = examples[sent0_cname] + examples[sent1_cname] + examples[sent2_cname] 
+        sentences = examples[sent0_cname] + examples[sent1_cname]
+
+        # If tree dataset
+        if sent2_cname is not None:
+            for idx in range(total):
+                if examples[sent2_cname][idx] is None:
+                    examples[sent2_cname][idx] = " "
+            sentences += examples[sent2_cname]
 
         sent_features = tokenizer(
             sentences,
@@ -476,8 +508,13 @@ def main():
         )
 
         features = {}
-        for key in sent_features:
-            features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)] 
+        if sent2_cname is not None:
+            for key in sent_features:
+                features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)]
+        else:
+            for key in sent_features:
+                features[key] = [[sent_features[key][i], sent_features[key][i+total]] for i in range(total)]
+            
         return features
     
     if training_args.do_train:
@@ -488,6 +525,8 @@ def main():
             remove_columns=column_names,
             load_from_cache_file=not data_args.overwrite_cache,
         )
+        train_dataset = train_dataset.shuffle(seed=1993)
+
 
     # Data collator
     @dataclass

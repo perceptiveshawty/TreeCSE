@@ -33,7 +33,7 @@ class Teacher(SimCSE):
 
         embedding_list = [] 
         with torch.no_grad():
-            inputs = {k: v.to(target_device) for k, v in inputs.items()}
+            inputs = {k: v.to(target_device) for k, v in inputs.items() if k != 'labels'}
             outputs = self.model(**inputs, return_dict=True)
             if self.pooler == "cls":
                 embeddings = outputs.pooler_output

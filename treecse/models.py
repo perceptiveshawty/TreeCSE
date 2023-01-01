@@ -33,6 +33,28 @@ class MLPLayer(nn.Module):
 
         return x
 
+class JointMLP(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        list_layers = [nn.Linear(2 * config.hidden_size, 2 * config.hidden_size, bias=False),
+                       nn.ReLU(inplace=True),
+                       nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)]
+        self.net = nn.Sequential(*list_layers)
+
+    def forward(self, x, **kwargs):
+        return self.net(x)
+
+class ClassifierHead(nn.Module):
+
+    def __init__(self, config, num_classes=17):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, num_classes, bias=False)
+
+    def forward(self, features, **kwargs):
+        return self.dense(features)
+
+
 class Similarity(nn.Module):
     """
     Dot product or cosine similarity
@@ -111,25 +133,6 @@ class ListMLE(nn.Module):
 
         return self.gamma_ * torch.mean(torch.sum(observation_loss, dim=1))
 
-class StructureLoss(nn.Module):
-
-    def __init__(self, delta_, blur):
-        super(StructureLoss, self).__init__()
-        self.delta_ = delta_
-
-    def forward(self, zS, zT):
-        with torch.no_grad():
-            zTd = (zT.unsqueeze(0) - zT.unsqueeze(1))
-            norm_zTd = F.normalize(zTd, p=2, dim=2)
-            angle_T = torch.bmm(norm_zTd, norm_zTd.transpose(1, 2)).view(-1)
-
-        zSd = (zS.unsqueeze(0) - zS.unsqueeze(1))
-        norm_zSd = F.normalize(zSd, p=2, dim=2)
-        angle_S = torch.bmm(norm_zSd, norm_zSd.transpose(1, 2)).view(-1)
-
-        return self.delta_ * F.smooth_l1_loss(angle_S, angle_T, reduction='mean')
-        # return F.smooth_l1_loss(angle_S, angle_T, reduction='sum')
-
 class Pooler(nn.Module):
     """
     Parameter-free poolers to get the sentence embedding
@@ -172,18 +175,15 @@ def cl_init(cls, config):
     """
     cls.pooler_type = cls.model_args.pooler_type
     cls.pooler = Pooler(cls.model_args.pooler_type)
-    if cls.model_args.pooler_type == "cls":
+    if cls.model_args.pooler_type == "cls" or cls.model_args.pooler_type == "avg":
         cls.mlp = MLPLayer(config)
+    if cls.model_args.two_poolers:
+        cls.jnt = JointMLP(config)
+    if cls.model_args.do_clf:
+        cls.clf = ClassifierHead(config, 17)
+
     cls.sim = Similarity(temp=cls.model_args.temp)
     cls.div = Divergence(beta_=cls.model_args.beta_)
-    # if cls.model_args.distillation_loss == "listnet":
-    #     cls.distillation_loss_fct = ListNet(cls.model_args.tau2, cls.model_args.gamma_)
-    # elif cls.model_args.distillation_loss == "listmle":
-    #     cls.distillation_loss_fct = ListMLE(cls.model_args.tau2, cls.model_args.gamma_)
-    # elif cls.model_args.distillation_loss == "sinkhorn":
-    #     cls.distillation_loss_fct = SamplesLoss(loss="sinkhorn", p=2, blur=cls.model_args.blur)
-    # else:
-    #     cls.distillation_loss_fct = RankingLoss(cls.model_args.tau2, cls.model_args.gamma_, cls.model_args.delta_, cls.model_args.blur)
     cls.init_weights()
 
 def cl_forward(cls,
@@ -246,20 +246,25 @@ def cl_forward(cls,
     # Pooling
     pooler_output = cls.pooler(attention_mask, outputs)
     pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
-
-    # Tree-based ensembling
     xP, xL, xR = torch.split(pooler_output, split_size_or_sections=1, dim=1) # (bs, 1, hidden) x 3
-    xLR = 0.5 * (xL + xR) # ensemble left and right constituents to create positive example for xi
-    pooler_output = torch.cat([xP, xLR], dim=1) # (bs, 2, hidden)
 
-    # If using "cls", we add an extra MLP layer
-    # (same as BERT's original implementation) over the representation.
-    if cls.pooler_type == "cls":
+    if not cls.model_args.two_poolers:
+        # Tree-based ensembling
+        xLR = 0.5 * (xL + xR) # ensemble left and right constituents to create positive example for xi
+        pooler_output = torch.cat([xP, xLR], dim=1) # (bs, 2, hidden)
+
+        # If using "cls", we add an extra MLP layer
+        # (same as BERT's original implementation) over the representation.
         pooler_output = cls.mlp(pooler_output) # (bs, 2, hidden)
 
-    # Separate representation
-    zP, zLR = torch.split(pooler_output, split_size_or_sections=1, dim=1) # (bs, 1, hidden) x 2
-    zP, zLR = zP.squeeze(), zLR.squeeze() # (bs, hidden) x 2
+        # Separate representation
+        zP, zLR = torch.split(pooler_output, split_size_or_sections=1, dim=1) # (bs, 1, hidden) x 2
+        zP, zLR = zP.squeeze(), zLR.squeeze() # (bs, hidden) x 2
+    else:
+        # Tree-based ensembling
+        zP = cls.mlp(xP).squeeze()
+        zLR = cls.jnt(torch.cat([xL, xR], dim=2)).squeeze()
+
 
     # Gather all embeddings if using distributed training
     if dist.is_initialized() and cls.training:
@@ -284,18 +289,28 @@ def cl_forward(cls,
 
     # L_infoNCE
     if cls.model_args.do_nce:
-        labels = torch.arange(zP_zLR_sim_S.size(0)).long().to(cls.device)
+        nce_labels = torch.arange(zP_zLR_sim_S.size(0)).long().to(cls.device)
         nce_loss_fct = nn.CrossEntropyLoss()
-        loss = loss + nce_loss_fct(zP_zLR_sim_S, labels) 
+        loss = loss + nce_loss_fct(zP_zLR_sim_S, nce_labels) 
+
+    # L_clf
+    if cls.model_args.do_clf:
+        clf_output = cls.clf(zLR)
+        class_weights = [0.4696812298220549, 0.35647741811866074, 0.18797756457396197, 1.2128324562464186, 3.4169412949618976, 1.0654509472935543, 0.7755944591390502, 8.480163944971833, 1.3588046813799115, 7.098408449295764, 1.0315564016602632, 0, 15.927678818006076, 41.81936010151364, 70.86361542005837, 51.45168664622247, 2584.8347338935573]
+        class_weights = torch.tensor(class_weights, dtype=zP.dtype, device=cls.device)
+
+        scl_loss_fct = nn.CrossEntropyLoss(weight=class_weights)
+        labels = labels.squeeze().long().to(cls.device)
+        loss = loss + (cls.model_args.delta_ * scl_loss_fct(clf_output, labels))
 
     # L_distillation
     if cls.model_args.do_kd:
         kd_loss_fct = (ListMLE(cls.model_args.tau2, cls.model_args.gamma_) if cls.model_args.distillation_loss == "listmle" else ListNet(cls.model_args.tau2, cls.model_args.gamma_))
-        loss = loss + kd_loss_fct(zP_zLR_sim_S, zP_zLR_sim_T) # zP_zLR_sim_T is the similarity matrix computed by the teacher(s)
+        loss = loss + kd_loss_fct(zP_zLR_sim_S.clone(), zP_zLR_sim_T.clone()) # zP_zLR_sim_T is the similarity matrix computed by the teacher(s)
 
     # L_consistency
     if cls.model_args.do_sd:
-        loss = loss + cls.div(zP_zLR_sim_S.softmax(dim=-1).clamp(min=1e-7), zLR_zP_sim_S.softmax(dim=-1).clamp(min=1e-7)) 
+        loss = loss + cls.div(zP_zLR_sim_S.clone().softmax(dim=-1).clamp(min=1e-7), zLR_zP_sim_S.clone().softmax(dim=-1).clamp(min=1e-7)) 
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:

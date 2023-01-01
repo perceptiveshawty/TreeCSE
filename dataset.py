@@ -3,11 +3,10 @@ import ndjson
 import argparse
 from RST import RST
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='RST Dataset Curation')
-    parser.add_argument('--strategy', type=str, default='simcse', choices=['full', 'deep', 'shallow', 'simcse'],
-                        help='whether to sample from the whole (full) RST, or bottom/top (deep/shallow) of the RST')
+    parser.add_argument('--strategy', type=str, default='tree', choices=['tree', 'edu'],
+                        help='whether to create the dataset to train the teacher or student')
     parser.add_argument('--data_dir', type=str, default='./data/wikitext103',
                         help='path to data dir; expects output of DMRST_Parser + original text file (4 total files)')
     return parser.parse_args()
@@ -73,11 +72,15 @@ def merge_edus(items, k=3): # auxiliary function to combine adjacent shortest ed
 
 def make_rst_dataset(output_dir, strategy):
     examples = []
-    path_to_sentences = 'wiki1m_for_simcse.txt' if strategy == 'simcse' else 'passages.txt'
+    label2int = {}
+    int2freq = {}
+    intlabel = 0
+    path_to_sentences = 'wiki1m_for_simcse.txt' if 'wiki1m' in output_dir else 'passages.txt'
     with open(os.path.join(output_dir, path_to_sentences), 'r') as p_, open(os.path.join(output_dir, 'tokenization.txt'), 'r') as t_, open(os.path.join(output_dir, 'segmentation.txt'), 'r') as e_, open(os.path.join(output_dir, 'tree.txt'), 'r') as s_:
         orig_examples, rst_tokens, rst_edus, rst_rels = p_.readlines(), t_.readlines(), e_.readlines(), s_.readlines()
     
-    for index, ex in enumerate(orig_examples):
+    num_examples = len(rst_rels)
+    for index in range(num_examples):
         try:
             tokenization = rst_tokens[index].strip()[1:-1].split(", ")
             tokenization = [t[1:-1] for t in tokenization]
@@ -85,38 +88,81 @@ def make_rst_dataset(output_dir, strategy):
             parsetree = rst_rels[index].strip()[2:-2].split()
             rst_example = RST.from_data(tokenization, segmentation, parsetree)
         except:
-            tokens = ex.split()
-            word_count = len(tokens)
-            parent, left, right = ex, " ".join(tokens[:word_count]).strip(), " ".join(tokens[word_count:]).strip()
-            examples.append({'parent' : parent, 'left' : left, 'right' : right})
+            # tokens = ex.split()
+            # word_count = len(tokens)
+            # parent, left, right = ex, " ".join(tokens[:word_count]).strip(), " ".join(tokens[word_count:]).strip()
+            # examples.append({'parent' : parent, 'left' : left, 'right' : right})
             continue
 
-        if strategy != 'simcse':
-            all_left_args, all_right_args, all_schemes = RST.all_rst_cutouts(rst_example)
-            all_cutouts_valid = [(sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]), left_, right_, scheme_) for left_, right_, scheme_ in zip(all_left_args, all_right_args, all_schemes) if sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]) > 40]
-            _, left_arg_edus, right_arg_edus, _ = zip(*sorted(all_cutouts_valid, key=lambda x:x[0], reverse=False))
+        if strategy == "tree":
+            if 'wiki1m' not in output_dir:
+                all_left_args, all_right_args, all_schemes = RST.all_rst_cutouts(rst_example)
+                all_cutouts_valid = [(sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]), left_, right_, scheme_) for left_, right_, scheme_ in zip(all_left_args, all_right_args, all_schemes) if sum([sum(len(edu__.text) for edu__ in left_), sum(len(edu__.text) for edu__ in right_)]) > 20]
+                _, left_arg_edus, right_arg_edus, all_schemes = zip(*sorted(all_cutouts_valid, key=lambda x:x[0], reverse=False))
 
-            deep = 0
-            for lae, rae in zip(left_arg_edus, right_arg_edus):
-                if deep <= len(left_arg_edus) // 2:
-                    all_edus = [e.text for e in lae] + [e.text for e in rae]
-                    parent = " ".join(all_edus)
-                    left, right = merge_edus(all_edus, k=2)
-                    examples.append({'parent' : parent, 'left' : left, 'right' : right})
-                deep += 1
+                deep = 0
+                cutoff = len(left_arg_edus) // 3
+                for k in range(len(all_schemes)):
+                    lae, rae, sch = left_arg_edus[k], right_arg_edus[k], all_schemes[k].split("-")[-1]
+                    if deep <= cutoff:
+                        left = " ".join([e.text for e in lae])
+                        right = " ".join([e.text for e in rae])
+                        parent = left + " " + right
+                        if sch not in label2int:
+                            label2int[sch] = intlabel
+                            intlabel += 1
+                            int2freq[label2int[sch]] = 0
+                        int2freq[label2int[sch]] += 1
+                        # all_edus = [e.text for e in lae]
+                        # all_edus = all_edus + [e.text for e in rae]
+                        # parent = " ".join(all_edus)
+                        # left, right =
+                        # left, right = merge_edus([e.text for e in lae] + [e.text for e in rae], k=2)
+                        examples.append({'parent' : parent, 'left' : left, 'right' : right, 'label' : label2int[sch]})
+                    deep += 1
+            else:
+                left_arg_edus, right_arg_edus, all_schemes = RST.all_rst_cutouts(rst_example)
+
+                for k in range(len(all_schemes)):
+                    lae, rae, sch = left_arg_edus[k], right_arg_edus[k], all_schemes[k].split("-")[-1]
+                    left = " ".join([e.text for e in lae])
+                    right = " ".join([e.text for e in rae])
+                    parent = left + " " + right 
+                    if sch not in label2int:
+                        label2int[sch] = intlabel
+                        intlabel += 1
+                        int2freq[label2int[sch]] = 0
+                    int2freq[label2int[sch]] += 1
+                    # all_edus = [e.text for e in lae] + [e.text for e in rae]
+                    # parent = " ".join(all_edus)
+                    # left, right = " ".join([e.text for e in lae]), " ".join([e.text for e in rae])
+                    # left, right = merge_edus(all_edus, k=2)
+                    examples.append({'parent' : parent, 'left' : left, 'right' : right, 'label' : label2int[sch]})
+
         else:
-            left_arg_edus, right_arg_edus, all_schemes = RST.all_rst_cutouts(rst_example)
+            left_edus, right_edus = RST.get_left_subtree_edus(rst_example), RST.get_right_subtree_edus(rst_example)
+            for lae in left_edus:
+                examples.append({"edu" : lae})
+            for rae in right_edus:
+                examples.append({"edu" : rae})
 
-            for lae, rae in zip(left_arg_edus, right_arg_edus):
-                all_edus = [e.text for e in lae] + [e.text for e in rae]
-                parent = " ".join(all_edus)
-                left, right = merge_edus(all_edus, k=2)
-                examples.append({'parent' : parent, 'left' : " ".join(left), 'right' : " ".join(right)})
+    print("num examples: ", len(examples))
+    print("num labels: ", len(label2int))
+    print("label2int: ", label2int)
+    print("int2freq: ", int2freq)
 
-    with open(os.path.join(output_dir, 'rst_data_for_cse_v3.json'), 'w') as jout:
+    weights = [0]*len(label2int)
+    for it in range(len(label2int)):
+        weights[it] = len(examples) / (int2freq[it] * len(label2int))
+
+    print("class weights: \n", weights)
+
+    save_path = os.path.join(output_dir, 'rst_data_for_cse_v1.json')
+    with open(save_path, 'w') as jout:
         ndjson.dump(examples, jout)
 
 if __name__ == '__main__':
+
     args = parse_args()
     make_rst_dataset(args.data_dir, args.strategy)
     # if args.strategy == 'full':
